@@ -116,7 +116,7 @@ PARAM_SCHEMA = [
         "key": "enable_ai_clustering", "cli": "--enable-ai-clustering", "type": "bool",
         "default": True,
         "label": "AI Clustering Engine",
-        "tooltip": "The core AI engine. Uses CLIP visual embeddings and HDBSCAN density clustering to group semantic similar images.",
+        "tooltip": "Analyzes visual content using CLIP embeddings to group images into semantic clusters (e.g., 'Beaches', 'Documents').",
         "group": "core",
         "is_plugin": True, "plugin_icon": "brain",
     },
@@ -136,6 +136,13 @@ PARAM_SCHEMA = [
         "group": "general",
     },
     # ── Clustering ───────────────────────────────────────────
+    {
+        "key": "ai_clustering_mode", "cli": "--ai-clustering-mode", "type": "choice",
+        "choices": ["individual", "folder"], "default": "individual",
+        "label": "Clustering Strategy",
+        "tooltip": "Individual: Clusters every file separately. Folder: Aggregates subfolder contents first to find similar directories/backups.",
+        "group": "clustering",
+    },
     {
         "key": "min_cluster_size", "cli": "--cluster-min-size", "type": "int",
         "default": 3, "min": 2, "max": 20,
@@ -795,13 +802,14 @@ def phase3_clustering(
     visual_weight: float = 1.0,
     group_name_matches: bool = False,
     group_name_prefix: bool = False,
+    ai_clustering_mode: str = "individual",
 ) -> tuple[list[dict], dict[int, list[Path]]]:
     """
     Generate CLIP embeddings + temporal features, cluster with HDBSCAN.
     Returns (log_entries, cluster_map {cluster_id: [paths]}).
     """
     log.info("=" * 60)
-    log.info("PHASE 3 — Spatiotemporal Clustering")
+    log.info("PHASE 3 — Spatiotemporal Clustering (%s mode)", ai_clustering_mode.upper())
     log.info("=" * 60)
 
     if not image_paths:
@@ -927,21 +935,56 @@ def phase3_clustering(
 
     import hdbscan
 
-    log.info(
-        "Running HDBSCAN (min_cluster_size=%d, min_samples=%s, eps=%.2f, method=%s) …",
-        min_cluster_size,
-        min_samples,
-        cluster_selection_epsilon,
-        cluster_selection_method,
-    )
-    clusterer = hdbscan.HDBSCAN(
-        min_cluster_size=min_cluster_size,
-        min_samples=min_samples,
-        cluster_selection_epsilon=cluster_selection_epsilon,
-        cluster_selection_method=cluster_selection_method,
-        metric="euclidean",
-    )
-    labels = clusterer.fit_predict(combined)
+    if ai_clustering_mode == "folder":
+        log.info("Aggregating folder centroids for clustering …")
+        # Map folders to their image indices
+        folder_to_indices = defaultdict(list)
+        for idx, p in enumerate(valid_paths):
+            folder_to_indices[str(p.parent.resolve())].append(idx)
+        
+        folder_paths = sorted(folder_to_indices.keys())
+        folder_features = []
+        for folder in folder_paths:
+            indices = folder_to_indices[folder]
+            # Mean centroid for this folder
+            centroid = np.mean(combined[indices], axis=0)
+            # Re-normalize visual part? Actually, combined is weighted, so just mean is fine for identity.
+            folder_features.append(centroid)
+        
+        folder_matrix = np.vstack(folder_features)
+        
+        log.info("Running HDBSCAN on %d folders …", len(folder_matrix))
+        clusterer = hdbscan.HDBSCAN(
+            min_cluster_size=max(2, min_cluster_size // 2) if len(folder_matrix) > 2 else 1, # Folders are coarser
+            min_samples=min_samples,
+            cluster_selection_epsilon=cluster_selection_epsilon,
+            cluster_selection_method=cluster_selection_method,
+            metric="euclidean",
+        )
+        folder_labels = clusterer.fit_predict(folder_matrix)
+        
+        # Map folder labels back to individual image labels
+        labels = np.full(len(valid_paths), -1)
+        for f_idx, label in enumerate(folder_labels):
+            folder = folder_paths[f_idx]
+            for img_idx in folder_to_indices[folder]:
+                labels[img_idx] = label
+    else:
+        log.info(
+            "Running HDBSCAN (min_cluster_size=%d, min_samples=%s, eps=%.2f, method=%s) …",
+            min_cluster_size,
+            min_samples,
+            cluster_selection_epsilon,
+            cluster_selection_method,
+            )
+        clusterer = hdbscan.HDBSCAN(
+            min_cluster_size=min_cluster_size,
+            min_samples=min_samples,
+            cluster_selection_epsilon=cluster_selection_epsilon,
+            cluster_selection_method=cluster_selection_method,
+            metric="euclidean",
+        )
+        labels = clusterer.fit_predict(combined)
 
     n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
     n_noise = int(np.sum(labels == -1))
@@ -1286,6 +1329,12 @@ def _confirm_mode() -> tuple[bool, str]:
 
 def _get_cluster_params() -> dict:
     """Prompt for HDBSCAN parameters with sensible defaults."""
+    print("\n  Clustering Strategy:")
+    print("   [1]  📄 Individual Mode - fine-grained file grouping (default)")
+    print("   [2]  📂 Folder Mode     - groups folders based on collective content")
+    mode_choice = _prompt("  Select mode [1/2] (default 1): ", "1")
+    mode = "folder" if mode_choice == "2" else "individual"
+
     raw_min = _prompt("  HDBSCAN min_cluster_size [3]: ", "3")
     try:
         min_size = int(raw_min)
@@ -1342,7 +1391,8 @@ def _get_cluster_params() -> dict:
         "temporal_weight": tw,
         "filename_weight": fw,
         "color_weight": cw,
-        "near_duplicate_weight": nw,
+        "near_duplicate_weight": ndw,
+        "ai_clustering_mode": mode
     }
 
 
@@ -1415,6 +1465,8 @@ def interactive_main() -> None:
                 filename_weight=params["filename_weight"],
                 color_weight=params["color_weight"],
                 near_duplicate_weight=params["near_duplicate_weight"],
+                visual_weight=1.0,  # Default in interactive menu mode
+                ai_clustering_mode=params.get("ai_clustering_mode", "individual"),
             )
             cluster_entries = clust_entries
             all_entries.extend(clust_entries)
@@ -1503,6 +1555,7 @@ def interactive_main() -> None:
                     filename_weight=params.get("filename_weight", 0.0),
                     color_weight=params.get("color_weight", 0.0),
                     near_duplicate_weight=params.get("near_duplicate_weight", 0.0),
+                    ai_clustering_mode=params.get("ai_clustering_mode", "individual"),
                 )
             elif params.get("group_name_matches", False) or params.get("group_name_prefix", False):
                 log.info("[INFO] AI Clustering disabled, but Name Grouping is enabled. Running standalone.")
@@ -1718,6 +1771,7 @@ def main() -> None:
             visual_weight=_arg("visual_weight"),
             group_name_matches=_arg("group_name_matches"),
             group_name_prefix=_arg("group_name_prefix"),
+            ai_clustering_mode=_arg("ai_clustering_mode"),
         )
     elif _arg("group_name_matches") or _arg("group_name_prefix"):
         log.info("[INFO] AI Clustering disabled, but Name Grouping is enabled. Running standalone.")

@@ -209,10 +209,17 @@
                 return () => window.removeEventListener('keydown', handleKey);
             }, [lightboxItem, lightboxNav]);
 
-            // AI Tuning Parameters — initialized from schema
             const [paramSchema, setParamSchema] = useState([]);
             const [aiParams, setAiParams] = useState({});
             const [enabledPlugins, setEnabledPlugins] = useState({});
+            const [modeSettings, setModeSettings] = useState({
+                individual: {},
+                folder: {
+                    min_cluster_size: 2,
+                    epsilon: 0.02
+                }
+            });
+            const [prevMode, setPrevMode] = useState('individual');
 
             // Heartbeat check for server health
             useEffect(() => {
@@ -260,6 +267,40 @@
                     })
                     .catch(err => console.warn('Schema fetch failed, using defaults:', err));
             }, [serverUrl]);
+
+            // Handle AI Mode Switching (Persistence)
+            useEffect(() => {
+                const currentMode = aiParams.ai_clustering_mode || 'individual';
+                if (currentMode === prevMode) return;
+
+                // 1. Save current tuning vars to the previous mode's bucket
+                // We only save keys that exist in the clustering/weights schema categories
+                const clusteringKeys = paramSchema
+                    .filter(p => p.group === 'clustering' || p.group === 'weights')
+                    .map(p => p.key);
+
+                const backup = {};
+                clusteringKeys.forEach(k => {
+                    if (aiParams[k] !== undefined) backup[k] = aiParams[k];
+                });
+
+                setModeSettings(prev => ({
+                    ...prev,
+                    [prevMode]: backup
+                }));
+
+                // 2. Load settings for the new mode if they exist
+                const nextSettings = modeSettings[currentMode];
+                if (Object.keys(nextSettings).length > 0) {
+                    setAiParams(prev => ({
+                        ...prev,
+                        ...nextSettings,
+                        ai_clustering_mode: currentMode
+                    }));
+                }
+
+                setPrevMode(currentMode);
+            }, [aiParams.ai_clustering_mode, prevMode, paramSchema]);
 
             // Toggle a plugin on/off with mutual exclusivity logic
             const togglePlugin = (key) => {
