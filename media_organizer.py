@@ -77,7 +77,7 @@ PARAM_SCHEMA = [
         "key": "enable_video_sorting", "cli": "--enable-video-sorting", "type": "bool",
         "default": True,
         "label": "Video Sorting",
-        "tooltip": "Phase 1: Detects video orientation and sorts into Horizontal/Vertical folders",
+        "tooltip": "Analyzes FFmpeg metadata to detect orientation; automatically sorts clips into Horizontal or Vertical subfolders.",
         "group": "core",
         "is_plugin": True, "plugin_icon": "video",
     },
@@ -85,7 +85,7 @@ PARAM_SCHEMA = [
         "key": "enable_video_deduplication", "cli": "--enable-video-deduplication", "type": "bool",
         "default": True,
         "label": "Video De-duplication",
-        "tooltip": "Phase 1: Identifies exact binary duplicates of videos and moves them to 'Duplicates' folder",
+        "tooltip": "Uses fast binary hashing to identify exact duplicate video files, moving redundant copies to a dedicated folder.",
         "group": "core",
         "is_plugin": True, "plugin_icon": "copy",
     },
@@ -93,15 +93,30 @@ PARAM_SCHEMA = [
         "key": "enable_deduplication", "cli": "--enable-deduplication", "type": "bool",
         "default": True,
         "label": "Image De-duplication",
-        "tooltip": "Phase 2: Identifies exact binary duplicates and moves them to 'Duplicates' folder",
+        "tooltip": "Generates MD5 checksums for every image to identify byte-for-byte identical files regardless of their filename.",
         "group": "core",
         "is_plugin": True, "plugin_icon": "zap",
+    },
+    {
+        "key": "enable_folder_flattening", "cli": "--enable-folder-flattening", "type": "bool",
+        "default": False,
+        "label": "Subfolder Flattening",
+        "tooltip": "Overrides AI. Moves files from all subfolders into the root Organized folder. Useful for flattening complex directory structures into a single list.",
+        "group": "core",
+        "is_plugin": True, "plugin_icon": "layers",
+    },
+    {
+        "key": "flatten_rename", "cli": "--flatten-rename", "type": "bool",
+        "default": True,
+        "label": "Contextual Rename",
+        "tooltip": "When flattening, prepends the parent folder name and adds a sequence number (e.g., 'Folder - Name - 001.jpg') based on creation date.",
+        "group": "core",
     },
     {
         "key": "enable_ai_clustering", "cli": "--enable-ai-clustering", "type": "bool",
         "default": True,
         "label": "AI Clustering Engine",
-        "tooltip": "Phase 3 & 4: Uses CLIP and HDBSCAN to group similar images and rename them",
+        "tooltip": "The core AI engine. Uses CLIP visual embeddings and HDBSCAN density clustering to group semantic similar images.",
         "group": "core",
         "is_plugin": True, "plugin_icon": "brain",
     },
@@ -125,28 +140,28 @@ PARAM_SCHEMA = [
         "key": "min_cluster_size", "cli": "--cluster-min-size", "type": "int",
         "default": 3, "min": 2, "max": 20,
         "label": "Min Cluster Size",
-        "tooltip": "Minimum items to form a group. Larger values ignore smaller potential matches",
+        "tooltip": "Minimum items required to form a group. Higher values lead to larger, more robust clusters but more 'Unsorted' images.",
         "group": "clustering",
     },
     {
         "key": "min_samples", "cli": "--cluster-min-samples", "type": "int",
         "default": 0, "min": 0, "max": 10,
         "label": "Min Samples",
-        "tooltip": "Noise rejection. 0 = auto (recommended); Higher values force more items to Unsorted",
+        "tooltip": "Controls noise rejection. 0 balances automatically; increase this to force more stringent grouping requirements.",
         "group": "clustering",
     },
     {
         "key": "epsilon", "cli": "--cluster-epsilon", "type": "float",
         "default": 0.05, "min": 0.0, "max": 1.0, "step": 0.01,
         "label": "Epsilon",
-        "tooltip": "Merge distance threshold. Higher = more aggressive merging of nearby clusters",
+        "tooltip": "The distance threshold for merging clusters. Values above 0 will combine nearby groups found in the feature space.",
         "group": "clustering",
     },
     {
         "key": "method", "cli": "--cluster-selection-method", "type": "choice",
         "choices": ["eom", "leaf"], "default": "eom",
         "label": "Cluster Method",
-        "tooltip": "EOM = fewer large groups; Leaf = more small tight groups",
+        "tooltip": "EOM targets global density distribution for fewer large groups; Leaf targets local density for many tight groups.",
         "group": "clustering",
     },
     # ── Feature Weights (Plugins) ─────────────────────────────
@@ -154,7 +169,7 @@ PARAM_SCHEMA = [
         "key": "temporal_weight", "cli": "--temporal-weight", "type": "float",
         "default": 0.3, "min": 0.0, "max": 5.0, "step": 0.05,
         "label": "Temporal Weight",
-        "tooltip": "How much timestamps matter. High = group by time; 0 = ignore time entirely",
+        "tooltip": "Weights capture time relative to visual content. High values force clusters to stay in chronological proximity.",
         "group": "weights",
         "is_plugin": True, "plugin_icon": "clock",
     },
@@ -162,7 +177,7 @@ PARAM_SCHEMA = [
         "key": "filename_weight", "cli": "--filename-weight", "type": "float",
         "default": 0.0, "min": 0.0, "max": 5.0, "step": 0.05,
         "label": "Filename Weight",
-        "tooltip": "How much similar names matter. High = force sequentially named items together",
+        "tooltip": "Encodes filename similarity into the distance matrix. Use this to maintain existing sequential ordering.",
         "group": "weights",
         "is_plugin": True, "plugin_icon": "file-text",
     },
@@ -170,7 +185,7 @@ PARAM_SCHEMA = [
         "key": "color_weight", "cli": "--color-weight", "type": "float",
         "default": 0.0, "min": 0.0, "max": 5.0, "step": 0.05,
         "label": "Color Similarity Weight",
-        "tooltip": "How much overall color/lighting matters. High = group photos by background/lighting",
+        "tooltip": "Calculates global color histograms. Higher weights will group images based on their dominant color palettes.",
         "group": "weights",
         "is_plugin": True, "plugin_icon": "palette",
     },
@@ -178,7 +193,7 @@ PARAM_SCHEMA = [
         "key": "near_duplicate_weight", "cli": "--near-duplicate-weight", "type": "float",
         "default": 0.0, "min": 0.0, "max": 5.0, "step": 0.05,
         "label": "Visual Hash Weight",
-        "tooltip": "How much exact visual structure matters. High = force near-identical shots together",
+        "tooltip": "Uses perceptual hashing to bridge the gap between binary duplicates and AI, grouping near-identical burst shots.",
         "group": "weights",
         "is_plugin": True, "plugin_icon": "fingerprint",
     },
@@ -186,23 +201,23 @@ PARAM_SCHEMA = [
         "key": "group_name_matches", "cli": "--group-name-matches", "type": "bool",
         "default": False,
         "label": "Group Exact Names",
-        "tooltip": "Force files with identical names (case-insensitive) into the same cluster",
-        "group": "weights",
+        "tooltip": "A non-AI standalone feature. Immediately groups files that share the exact same case-insensitive base name.",
+        "group": "name_grouping",
         "is_plugin": True, "plugin_icon": "copy",
     },
     {
         "key": "group_name_prefix", "cli": "--group-name-prefix", "type": "bool",
         "default": False,
         "label": "Group Name Sequences",
-        "tooltip": "Group files sharing a name prefix (e.g. 'Image Example - 001' and 'Image Example - 105')",
-        "group": "weights",
+        "tooltip": "Detects shared word patterns in filenames to group collections exported with common naming schemas.",
+        "group": "name_grouping",
         "is_plugin": True, "plugin_icon": "list-ordered",
     },
     {
         "key": "visual_weight", "cli": "--visual-weight", "type": "float",
         "default": 1.0, "min": 0.0, "max": 5.0, "step": 0.05,
         "label": "Visual Similarity (AI)",
-        "tooltip": "How much CLIP visual features matter. 1.0 = standard; 0 = ignore visual content",
+        "tooltip": "The CLIP visual embedding weight. Dominates the grouping process by using AI to understand conceptual similarity.",
         "group": "weights",
         "is_plugin": True, "plugin_icon": "eye",
     },
@@ -516,8 +531,251 @@ def phase2_deduplication(
     return entries, unique
 
 
+def phase2b_folder_flattening(
+    root: Path, images: list[Path], dry_run: bool, action: str = "copy", rename: bool = True
+) -> tuple[list[dict], list[Path]]:
+    """
+    Flatten subfolders into the root of Organized.
+    Returns (log_entries, remaining_files_not_flattened).
+    """
+    log.info("=" * 60)
+    log.info("PHASE 2b — Subfolder Flattening")
+    log.info("=" * 60)
+
+    entries: list[dict] = []
+    remaining: list[Path] = []
+    
+    org_root = root / ORGANIZED_DIR_NAME
+    
+    # 1. Group by parent folder relative to root
+    # Exclusion: files already in Organized/ (shouldn't happen here due to earlier filters)
+    folders = defaultdict(list)
+    for p in images:
+        try:
+            # Check if it's in a subfolder relative to root
+            rel = p.parent.relative_to(root)
+            if str(rel) == ".":
+                # In root already
+                remaining.append(p)
+                continue
+            folders[rel].append(p)
+        except ValueError:
+            # Outside root? (unlikely)
+            remaining.append(p)
+
+    # 2. Process each folder
+    for rel_path, paths in sorted(folders.items()):
+        parent_name = rel_path.name
+        # Sort by creation time
+        paths.sort(key=lambda x: x.stat().st_ctime if x.exists() else 0)
+        
+        for i, fpath in enumerate(paths, 1):
+            if rename:
+                # {Folder} - {Original Name} - {Seq}
+                new_name = f"{parent_name} - {fpath.stem} - {i:03d}{fpath.suffix}"
+            else:
+                new_name = fpath.name
+                
+            dest = org_root / new_name
+            
+            # Collision-safe naming
+            if dest.exists() or any(e["New_Filename"] == dest.name for e in entries):
+                stem = dest.stem
+                suffix = dest.suffix
+                dest = org_root / f"{stem}_{short_path_hash(fpath)}{suffix}"
+            
+            safe_action(fpath, dest, dry_run, action=action)
+            
+            entries.append({
+                "Original_Path": str(fpath),
+                "New_Path": str(dest) if not dry_run else f"[DRY RUN] {dest}",
+                "New_Filename": dest.name,
+                "Hash": md5_hash(fpath) if fpath.suffix.lower() in IMAGE_EXTENSIONS else "",
+                "Cluster_ID": "flattened",
+                "Media_Type": "image" if fpath.suffix.lower() in IMAGE_EXTENSIONS else "other",
+                "Reason": f"Flattened from subfolder: {rel_path}",
+                "Confidence": "1.0",
+            })
+            
+    log.info("Phase 2b complete: %d files flattened.", len(entries))
+    return entries, remaining
+
+
 # ---------------------------------------------------------------------------
-# Phase 3 — Spatiotemporal Clustering
+# Phase 3 Helpers — Name Grouping
+# ---------------------------------------------------------------------------
+
+def apply_name_grouping_overrides(
+    valid_paths: list[Path],
+    labels: np.ndarray,
+    group_name_matches: bool,
+    group_name_prefix: bool
+) -> np.ndarray:
+    """
+    Reassign cluster labels based on exact filename matches or prefix patterns.
+    This runs as a post-processing step after AI clustering, or as the primary
+    logic when AI is disabled.
+    """
+    if not group_name_matches and not group_name_prefix:
+        return labels
+
+    import re
+    from collections import Counter, defaultdict
+
+    # 3d-post-1  Group Absolute Name Matches (case-insensitive stem)
+    if group_name_matches:
+        log.info("Applying absolute name grouping (case-insensitive stem sync) ...")
+        # Build name -> [indices] map
+        name_groups: dict[str, list[int]] = defaultdict(list)
+        for idx, fpath in enumerate(valid_paths):
+            key = fpath.stem.lower()
+            name_groups[key].append(idx)
+
+        merged_count = 0
+        next_new_label = max(labels) + 1 if len(labels) > 0 else 0
+
+        for name, indices in name_groups.items():
+            if len(indices) < 2:
+                continue 
+
+            current_labels = [labels[idx] for idx in indices]
+            real_labels = [l for l in current_labels if l != -1]
+
+            if real_labels:
+                target_label = Counter(real_labels).most_common(1)[0][0]
+            else:
+                target_label = next_new_label
+                next_new_label += 1
+
+            for idx in indices:
+                if labels[idx] != target_label:
+                    labels[idx] = target_label
+                    merged_count += 1
+
+        if merged_count > 0:
+            n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
+            n_noise = int(np.sum(labels == -1))
+            log.info("Name-match grouping: %d file(s) reassigned. Now %d cluster(s), %d outlier(s).", merged_count, n_clusters, n_noise)
+
+    # 3d-post-2  Group Name Prefix (sequence matching)
+    if group_name_prefix:
+        log.info("Applying signal-based name grouping (auto-detecting shared naming patterns) ...")
+        all_tokens = []
+        for fpath in valid_paths:
+            tokens = [t.strip() for t in re.split(r'[-_\s]+', fpath.stem.lower()) if t.strip()]
+            all_tokens.extend(tokens)
+        
+        token_counts = Counter(all_tokens)
+        signals = {t for t, count in token_counts.items() if count > 1 and not t.isdigit() and len(t) > 1}
+
+        def get_core_signals(stem: str) -> str:
+            s = stem.lower().strip()
+            s = re.sub(r'[\s_-]*(?:copy\s*)?(?:\(\d+\)\s*)?$', '', s)
+            tokens = [t.strip() for t in re.split(r'[-_\s]+', s) if t.strip()]
+            core_parts = [t for t in tokens if t in signals]
+            return " ".join(core_parts)
+
+        prefix_groups: dict[str, list[int]] = defaultdict(list)
+        for idx, fpath in enumerate(valid_paths):
+            core = get_core_signals(fpath.stem)
+            if core and len(core) > 2:
+                prefix_groups[core].append(idx)
+
+        merged_count = 0
+        next_new_label = max(labels) + 1 if len(labels) > 0 else 0
+
+        for core, indices in prefix_groups.items():
+            if len(indices) < 2:
+                continue
+
+            current_labels = [labels[idx] for idx in indices]
+            real_labels = [l for l in current_labels if l != -1]
+
+            if real_labels:
+                target_label = Counter(real_labels).most_common(1)[0][0]
+            else:
+                target_label = next_new_label
+                next_new_label += 1
+
+            for idx in indices:
+                if labels[idx] != target_label:
+                    labels[idx] = target_label
+                    merged_count += 1
+
+        if merged_count > 0:
+            n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
+            n_noise = int(np.sum(labels == -1))
+            log.info("Signal-based grouping: %d file(s) reassigned. Now %d cluster(s), %d outlier(s).", merged_count, n_clusters, n_noise)
+
+    return labels
+
+def phase3_standalone_grouping(
+    root: Path,
+    image_paths: list[Path],
+    dry_run: bool,
+    action: str = "copy",
+    group_name_matches: bool = False,
+    group_name_prefix: bool = False,
+) -> tuple[list[dict], dict[int, list[Path]]]:
+    """
+    Run name-based grouping WITHOUT AI clustering.
+    Moves files into sequential groups based on filename patterns.
+    """
+    if not image_paths:
+        return [], {}
+
+    log.info("=" * 60)
+    log.info("PHASE 3 (NON-AI) — Name-Based Grouping")
+    log.info("=" * 60)
+
+    # All start as noise (-1)
+    valid_paths = image_paths
+    labels = np.full(len(valid_paths), -1)
+
+    # Apply overrides
+    labels = apply_name_grouping_overrides(valid_paths, labels, group_name_matches, group_name_prefix)
+
+    # Move files and build entries
+    org_root = root / ORGANIZED_DIR_NAME
+    entries: list[dict] = []
+    cluster_map: dict[int, list[Path]] = defaultdict(list)
+
+    for fpath, label in zip(valid_paths, labels):
+        h = md5_hash(fpath)
+        if label == -1:
+            dest_dir = org_root / "unsorted"
+            cluster_id = "noise"
+            reason = "Unsorted: No naming pattern matches found"
+        else:
+            dest_dir = org_root / "groups" / f"Group_{label:03d}"
+            cluster_id = f"group_{label:03d}"
+            reason = f"Pattern: Group_{label:03d} name/sequence match"
+
+        dest = dest_dir / fpath.name
+        if dest.exists() and dest != fpath:
+            dest = dest_dir / f"{dest.stem}_{short_path_hash(fpath)}{dest.suffix}"
+
+        safe_action(fpath, dest, dry_run, action=action)
+        actual_dest = dest if not dry_run else fpath
+        cluster_map[label].append(actual_dest)
+
+        entries.append({
+            "Original_Path": str(fpath),
+            "New_Path": str(dest) if not dry_run else f"[DRY RUN] {dest}",
+            "New_Filename": dest.name,
+            "Hash": h,
+            "Cluster_ID": cluster_id,
+            "Media_Type": "image",
+            "Reason": reason,
+            "Confidence": "1.0000",
+            "Near_Misses": "{}",
+        })
+
+    log.info("Non-AI grouping complete.")
+    return entries, cluster_map
+
+# ---------------------------------------------------------------------------
+# Phase 3 — Spatiotemporal Clustering (AI)
 # ---------------------------------------------------------------------------
 
 
@@ -690,127 +948,9 @@ def phase3_clustering(
     log.info("Found %d cluster(s), %d outlier(s).", n_clusters, n_noise)
 
     # ------------------------------------------------------------------
-    # 3d-post  Group Absolute Name Matches
+    # 3d-post  Name-Based Overrides
     # ------------------------------------------------------------------
-    if group_name_matches:
-        log.info("Applying name-match grouping (case-insensitive stem)...")
-        from collections import Counter
-
-        # Build name -> [indices] map
-        name_groups: dict[str, list[int]] = defaultdict(list)
-        for idx, fpath in enumerate(valid_paths):
-            key = fpath.stem.lower()
-            name_groups[key].append(idx)
-
-        merged_count = 0
-        next_new_label = max(labels) + 1 if len(labels) > 0 else 0
-
-        for name, indices in name_groups.items():
-            if len(indices) < 2:
-                continue  # Only single file with this name
-
-            current_labels = [labels[i] for i in indices]
-            real_labels = [l for l in current_labels if l != -1]
-
-            if real_labels:
-                # Use the most common real cluster label
-                target_label = Counter(real_labels).most_common(1)[0][0]
-            else:
-                # All are noise — create a new cluster for them
-                target_label = next_new_label
-                next_new_label += 1
-
-            # Reassign all members of this name group to the target label
-            for i in indices:
-                if labels[i] != target_label:
-                    log.info(
-                        "  Name-match: '%s' (%s) -> cluster %d",
-                        name, valid_paths[i].name, target_label
-                    )
-                    labels[i] = target_label
-                    merged_count += 1
-
-        if merged_count > 0:
-            # Recount after merging
-            n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
-            n_noise = int(np.sum(labels == -1))
-            log.info(
-                "Name-match grouping: %d file(s) reassigned. Now %d cluster(s), %d outlier(s).",
-                merged_count, n_clusters, n_noise
-            )
-
-    # ------------------------------------------------------------------
-    # 3d-post-2  Group Name Prefix (sequence matching)
-    # ------------------------------------------------------------------
-    if group_name_prefix:
-        import re
-        from collections import Counter
-
-        log.info("Applying signal-based name grouping (auto-detecting shared naming patterns)...")
-
-        # 1. Tokenize all stems to find "Signals" (words that appear in >1 file)
-        all_tokens = []
-        for fpath in valid_paths:
-            # Split by any separator or whitespace
-            tokens = [t.strip() for t in re.split(r'[-_\s]+', fpath.stem.lower()) if t.strip()]
-            all_tokens.extend(tokens)
-        
-        token_counts = Counter(all_tokens)
-        # A token is a signal if it appears in at least 2 different filenames and isn't just a number
-        signals = {t for t, count in token_counts.items() if count > 1 and not t.isdigit() and len(t) > 1}
-
-        def get_core_signals(stem: str) -> str:
-            """Extract only the tokens that are shared across other files."""
-            s = stem.lower().strip()
-            # Strip common copy/version junk from the ends first
-            s = re.sub(r'[\s_-]*(?:copy\s*)?(?:\(\d+\)\s*)?$', '', s)
-            tokens = [t.strip() for t in re.split(r'[-_\s]+', s) if t.strip()]
-            # Filter tokens to only include those that are "Signals"
-            core_parts = [t for t in tokens if t in signals]
-            return " ".join(core_parts)
-
-        # Build prefix -> [indices] map
-        prefix_groups: dict[str, list[int]] = defaultdict(list)
-        for idx, fpath in enumerate(valid_paths):
-            core = get_core_signals(fpath.stem)
-            if core and len(core) > 2:  # Ignore very short signals
-                prefix_groups[core].append(idx)
-
-        merged_count = 0
-        next_new_label = max(labels) + 1 if len(labels) > 0 else 0
-
-        for core, indices in prefix_groups.items():
-            if len(indices) < 2:
-                continue
-
-            current_labels = [labels[i] for i in indices]
-            # Filters out noise (-1) to see if these files already belong to a cluster
-            real_labels = [l for l in current_labels if l != -1]
-
-            if real_labels:
-                # Use the most common cluster label from the group
-                target_label = Counter(real_labels).most_common(1)[0][0]
-            else:
-                # All were noise, so create a new "name-based" cluster
-                target_label = next_new_label
-                next_new_label += 1
-
-            for i in indices:
-                if labels[i] != target_label:
-                    log.info(
-                        "  Signal Match: '%s' (%s) -> cluster %d",
-                        core, valid_paths[i].name, target_label
-                    )
-                    labels[i] = target_label
-                    merged_count += 1
-
-        if merged_count > 0:
-            n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
-            n_noise = int(np.sum(labels == -1))
-            log.info(
-                "Signal-based grouping: %d file(s) reassigned. Now %d cluster(s), %d outlier(s).",
-                merged_count, n_clusters, n_noise
-            )
+    labels = apply_name_grouping_overrides(valid_paths, labels, group_name_matches, group_name_prefix)
 
     # ------------------------------------------------------------------
     # 3d  Geometric Diagnostics
@@ -1089,11 +1229,12 @@ MENU = """
 │                                                          │
 │   [1]  Phase 1 — Video Sorting  (orientation detect)     │
 │   [2]  Phase 2 — Image De-duplication  (MD5 hashing)     │
+│   [F]  Phase 2b — Subfolder Flattening (Override AI)    │
 │   [3]  Phase 3 — Spatiotemporal Clustering  (CLIP)       │
 │   [4]  Phase 4 — Contextual Naming & Attribution         │
 │   [5]  Phase 5 — Write Audit Log  (CSV)                  │
 │                                                          │
-│   [A]  ▶  Run ALL Phases (1 -> 5) in sequence             │
+│   [A]  ▶  Run ALL Phases in sequence                      │
 │                                                          │
 │   [Q]  Quit                                              │
 └──────────────────────────────────────────────────────────┘
@@ -1227,6 +1368,7 @@ def interactive_main() -> None:
     remaining_files: list[Path] | None = None
     unique_images: list[Path] | None = None
     cluster_entries: list[dict] | None = None
+    is_flattening = False
 
     while True:
         print(MENU)
@@ -1252,6 +1394,9 @@ def interactive_main() -> None:
 
         # ---- Phase 3 ----
         elif choice == "3":
+            if is_flattening:
+                print("  ⚠  Subfolder Flattening has been run. Skipping Phase 3 (AI).\n")
+                continue
             if unique_images is None:
                 # Collect images fresh if prior phases were not run
                 unique_images = [
@@ -1273,6 +1418,21 @@ def interactive_main() -> None:
             )
             cluster_entries = clust_entries
             all_entries.extend(clust_entries)
+
+        # ---- Phase 2b (Folder Flattening) ----
+        elif choice == "F":
+            if unique_images is None:
+                if remaining_files is None:
+                    remaining_files = [f for f in collect_all_files(root) if f.suffix.lower() not in VIDEO_EXTENSIONS]
+                unique_images = remaining_files
+            
+            rename_confirm = _prompt("  Rename with parent folder name? [Y/n]: ", "y").lower() == "y"
+            flat_entries, unique_images = phase2b_folder_flattening(
+                root, unique_images, dry_run, action=action, rename=rename_confirm
+            )
+            all_entries.extend(flat_entries)
+            if flat_entries:
+                is_flattening = True
 
         # ---- Phase 4 ----
         elif choice == "4":
@@ -1299,7 +1459,11 @@ def interactive_main() -> None:
         # ---- Run ALL ----
         elif choice == "A":
             print("  ▶  Running ALL phases in sequence …\n")
-            params = _get_cluster_params()
+            
+            enable_flat = _prompt("  Enable Subfolder Flattening? [y/N]: ", "n").lower() == "y"
+            params = {}
+            if not enable_flat:
+                params = _get_cluster_params()
 
             # Phase 1
             video_entries, remaining_files = phase1_video_sorting(root, dry_run, action=action)
@@ -1311,30 +1475,54 @@ def interactive_main() -> None:
             )
             all_entries.extend(dup_entries)
 
+            # Phase 2b
+            is_flat = False
+            if enable_flat:
+                rename_flat = _prompt("  Rename with parent folder name? [Y/n]: ", "y").lower() == "y"
+                flat_entries, unique_images = phase2b_folder_flattening(
+                    root, unique_images, dry_run, action=action, rename=rename_flat
+                )
+                all_entries.extend(flat_entries)
+                if flat_entries:
+                    is_flat = True
+                    is_flattening = True
+
             # Phase 3
-            clust_entries, _ = phase3_clustering(
-                root, unique_images, dry_run,
-                action=action,
-                min_cluster_size=params["min_cluster_size"],
-                min_samples=params["min_samples"],
-                cluster_selection_epsilon=params["epsilon"],
-                cluster_selection_method=params["method"],
-                temporal_weight=params["temporal_weight"],
-                filename_weight=params["filename_weight"],
-                color_weight=params.get("color_weight", 0.0),
-                near_duplicate_weight=params.get("near_duplicate_weight", 0.0),
-                visual_weight=params.get("visual_weight", 1.0),
-                group_name_matches=params.get("group_name_matches", False),
-                group_name_prefix=params.get("group_name_prefix", False),
-            )
+            clust_entries = []
+            if is_flat:
+                log.info("[SKIP] Phase 3: AI Clustering skipped due to Flattening.")
+            elif params.get("enable_ai_clustering", True):
+                clust_entries, _ = phase3_clustering(
+                    root, unique_images, dry_run,
+                    action=action,
+                    min_cluster_size=params.get("min_cluster_size", 3),
+                    min_samples=params.get("min_samples"),
+                    cluster_selection_epsilon=params.get("epsilon", 0.0),
+                    cluster_selection_method=params.get("method", "leaf"),
+                    temporal_weight=params.get("temporal_weight", 0.3),
+                    filename_weight=params.get("filename_weight", 0.0),
+                    color_weight=params.get("color_weight", 0.0),
+                    near_duplicate_weight=params.get("near_duplicate_weight", 0.0),
+                )
+            elif params.get("group_name_matches", False) or params.get("group_name_prefix", False):
+                log.info("[INFO] AI Clustering disabled, but Name Grouping is enabled. Running standalone.")
+                clust_entries, _ = phase3_standalone_grouping(
+                    root, unique_images, dry_run,
+                    action=action,
+                    group_name_matches=params.get("group_name_matches", False),
+                    group_name_prefix=params.get("group_name_prefix", False),
+                )
+            else:
+                log.info("[SKIP] Phase 3: AI Clustering and Name Grouping disabled.")
+            
             cluster_entries = clust_entries
 
             # Phase 4
-            if cluster_entries:
+            if not is_flat and cluster_entries:
                 cluster_entries = phase4_contextual_naming(
                     root, cluster_entries, dry_run
                 )
-            all_entries.extend(cluster_entries)
+                all_entries.extend(cluster_entries)
 
             # Phase 5
             run_settings = {
@@ -1453,18 +1641,22 @@ def main() -> None:
     # Build a clean dict from schema keys -> parsed values
     def _arg(key):
         """Get argparse value by schema key (CLI flag -> dest)."""
-        dest = key  # for simple keys
+        # 1. Find entry in schema
+        entry = _PARAM_MAP.get(key)
+        if not entry:
+            return None
+        
+        # 2. Map CLI flag to argparse destination name
         # argparse converts --cluster-min-size -> cluster_min_size
-        for p in PARAM_SCHEMA:
-            if p["key"] == key:
-                dest = p["cli"].lstrip("-").replace("-", "_")
-                break
-        return getattr(args, dest, p["default"])
+        dest = entry["cli"].lstrip("-").replace("-", "_")
+        return getattr(args, dest, entry.get("default"))
 
     dry_label = " [DRY RUN]" if _arg("dry_run") else ""
     log.info("Media Organizer starting%s — root: %s", dry_label, root)
 
     all_entries: list[dict] = []
+    cluster_entries: list[dict] = []
+    cluster_map: dict[int, list[Path]] = {}
 
     # Phase 1
     video_entries = []
@@ -1490,8 +1682,26 @@ def main() -> None:
     else:
         log.info("[SKIP] Phase 2: De-duplication disabled.")
 
+    # Phase 2b: Folder Flattening (New)
+    is_flattening = False
+    if _arg("enable_folder_flattening"):
+        flatten_entries, unique_images = phase2b_folder_flattening(
+            root,
+            unique_images,
+            _arg("dry_run"),
+            action=_arg("action"),
+            rename=_arg("flatten_rename"),
+        )
+        all_entries.extend(flatten_entries)
+        if flatten_entries:
+            is_flattening = True
+            log.info("[INFO] Subfolder Flattening active. AI Clustering and Name Grouping will be skipped.")
+
     # Phase 3
-    if _arg("enable_ai_clustering"):
+    if is_flattening:
+        log.info("[SKIP] Phase 3 & 3b: Skipped due to Subfolder Flattening.")
+        cluster_entries = []
+    elif _arg("enable_ai_clustering"):
         cluster_entries, cluster_map = phase3_clustering(
             root,
             unique_images,
@@ -1509,13 +1719,23 @@ def main() -> None:
             group_name_matches=_arg("group_name_matches"),
             group_name_prefix=_arg("group_name_prefix"),
         )
-
-        # Phase 4
-        if cluster_entries:
-            cluster_entries = phase4_contextual_naming(root, cluster_entries, _arg("dry_run"))
-        all_entries.extend(cluster_entries)
+    elif _arg("group_name_matches") or _arg("group_name_prefix"):
+        log.info("[INFO] AI Clustering disabled, but Name Grouping is enabled. Running standalone.")
+        cluster_entries, cluster_map = phase3_standalone_grouping(
+            root,
+            unique_images,
+            _arg("dry_run"),
+            action=_arg("action"),
+            group_name_matches=_arg("group_name_matches"),
+            group_name_prefix=_arg("group_name_prefix"),
+        )
     else:
-        log.info("[SKIP] Phase 3 & 4: AI Clustering disabled.")
+        log.info("[SKIP] Phase 3 & 3b: AI Clustering and Name Grouping disabled.")
+
+    # Phase 4 (Contextual Naming — applies to both AI or name-based clusters)
+    if not is_flattening and cluster_entries:
+        cluster_entries = phase4_contextual_naming(root, cluster_entries, _arg("dry_run"))
+        all_entries.extend(cluster_entries)
 
     # Phase 5 — auto-generate run_settings from schema
     run_settings = {p["key"]: _arg(p["key"]) for p in PARAM_SCHEMA}

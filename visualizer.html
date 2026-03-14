@@ -181,6 +181,7 @@
             const [isConsoleExpanded, setIsConsoleExpanded] = useState(false);
             const [isTuningCollapsed, setIsTuningCollapsed] = useState(false);
             const [isInventoryCollapsed, setIsInventoryCollapsed] = useState(false);
+            const [isFetchingLog, setIsFetchingLog] = useState(false);
 
             // Lightbox navigation helpers
             const lightboxNav = useCallback((direction) => {
@@ -260,9 +261,25 @@
                     .catch(err => console.warn('Schema fetch failed, using defaults:', err));
             }, [serverUrl]);
 
-            // Toggle a plugin on/off
+            // Toggle a plugin on/off with mutual exclusivity logic
             const togglePlugin = (key) => {
-                setEnabledPlugins(prev => ({ ...prev, [key]: !prev[key] }));
+                setEnabledPlugins(prev => {
+                    const next = { ...prev };
+                    const isNowEnabled = !next[key];
+                    next[key] = isNowEnabled;
+
+                    // If Flattening enabled: Disable AI and Name/Prefix grouping
+                    if (key === 'enable_folder_flattening' && isNowEnabled) {
+                        next['enable_ai_clustering'] = false;
+                        next['group_name_matches'] = false;
+                        next['group_name_prefix'] = false;
+                    }
+                    // If AI or Name grouping enabled: Disable Flattening
+                    if ((key === 'enable_ai_clustering' || key === 'group_name_matches' || key === 'group_name_prefix') && isNowEnabled) {
+                        next['enable_folder_flattening'] = false;
+                    }
+                    return next;
+                });
             };
 
             // Generic control renderer based on schema entry
@@ -276,8 +293,9 @@
                             <input type="checkbox" checked={!!val} onChange={(e) => update(e.target.checked)}
                                 className="w-3.5 h-3.5 accent-amber-500 rounded cursor-pointer" />
                             <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{p.label}</span>
-                            <i data-lucide="info" className="w-3 h-3 opacity-30 group-hover/ctrl:opacity-100 transition-opacity"></i>
-                            <div className="absolute left-0 bottom-full mb-2 w-52 p-2 bg-slate-800 text-slate-300 text-[9px] rounded-lg shadow-xl opacity-0 invisible group-hover/ctrl:opacity-100 group-hover/ctrl:visible transition-all z-50 pointer-events-none">
+                            <i data-lucide="info" className="w-2.5 h-2.5 text-slate-500 opacity-40 group-hover/ctrl:opacity-100 group-hover/ctrl:text-amber-400 transition-all cursor-help ml-2"></i>
+                            <div className="absolute left-0 bottom-full mb-2 w-64 p-3 bg-slate-800/95 backdrop-blur-xl text-slate-200 text-[10px] rounded-xl shadow-2xl border border-white/10 opacity-0 invisible group-hover/ctrl:opacity-100 group-hover/ctrl:visible transition-all z-[100] pointer-events-none font-medium leading-relaxed">
+                                <div className="text-amber-400 font-bold mb-1 uppercase tracking-tighter text-[9px]">Parameter Logic</div>
                                 {p.tooltip}
                             </div>
                         </label>
@@ -289,8 +307,9 @@
                             <div className="flex justify-between text-[11px] font-medium items-center group relative mb-1">
                                 <div className="flex items-center gap-1.5 cursor-help">
                                     <span>{p.label}</span>
-                                    <i data-lucide="info" className="w-3 h-3 opacity-30 group-hover:opacity-100 transition-opacity"></i>
-                                    <div className="absolute left-0 bottom-full mb-2 w-48 p-2 bg-slate-800 text-slate-300 text-[9px] rounded-lg shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 pointer-events-none">
+                                    <i data-lucide="info" className="w-2.5 h-2.5 text-slate-500 opacity-40 group-hover:opacity-100 group-hover:text-amber-400 transition-all"></i>
+                                    <div className="absolute left-0 bottom-full mb-2 w-64 p-3 bg-slate-800/95 backdrop-blur-xl text-slate-200 text-[10px] rounded-xl shadow-2xl border border-white/10 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-[100] pointer-events-none font-medium leading-relaxed">
+                                        <div className="text-amber-400 font-bold mb-1 uppercase tracking-tighter text-[9px]">Heuristic Policy</div>
                                         {p.tooltip}
                                     </div>
                                 </div>
@@ -317,8 +336,9 @@
                         <div className="flex justify-between text-[11px] font-medium items-center group relative">
                             <div className="flex items-center gap-1.5 cursor-help">
                                 <span>{p.label}</span>
-                                <i data-lucide="info" className="w-3 h-3 opacity-30 group-hover:opacity-100 transition-opacity"></i>
-                                <div className="absolute left-0 bottom-full mb-2 w-48 p-2 bg-slate-800 text-slate-300 text-[9px] rounded-lg shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 pointer-events-none">
+                                <i data-lucide="info" className="w-2.5 h-2.5 text-slate-500 opacity-40 group-hover:opacity-100 group-hover:text-amber-400 transition-all"></i>
+                                <div className="absolute left-0 bottom-full mb-2 w-64 p-3 bg-slate-800/95 backdrop-blur-xl text-slate-200 text-[10px] rounded-xl shadow-2xl border border-white/10 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-[100] pointer-events-none font-medium leading-relaxed">
+                                    <div className="text-amber-400 font-bold mb-1 uppercase tracking-tighter text-[9px]">Variable Influence</div>
                                     {p.tooltip}
                                 </div>
                             </div>
@@ -347,8 +367,15 @@
                                     <i data-lucide={icon} className="w-3 h-3"></i>
                                 </div>
                                 <div className="max-w-[140px]">
-                                    <div className="text-[10px] font-bold text-slate-300 uppercase tracking-wider truncate">{p.label}</div>
-                                    <div className="text-[8px] text-slate-600 truncate">{isAiClusteringOff ? "Requires AI Engine to be active" : p.tooltip}</div>
+                                    <div className="flex items-center gap-1.5 group/info relative">
+                                        <div className="text-[10px] font-bold text-slate-300 uppercase tracking-wider truncate">{p.label}</div>
+                                        <i data-lucide="info" className="w-2.5 h-2.5 text-slate-500 opacity-40 group-hover/info:opacity-100 group-hover/info:text-amber-400 transition-all cursor-help"></i>
+                                        <div className="absolute left-0 bottom-full mb-2 w-64 p-3 bg-slate-800/95 backdrop-blur-xl text-slate-200 text-[10px] rounded-xl shadow-2xl border border-white/10 opacity-0 invisible group-hover/info:opacity-100 group-hover/info:visible transition-all z-[100] pointer-events-none font-medium leading-relaxed">
+                                            <div className="text-amber-400 font-bold mb-1 uppercase tracking-tighter text-[9px]">Plugin Analysis</div>
+                                            {p.tooltip}
+                                        </div>
+                                    </div>
+                                    <div className="text-[8px] text-slate-600 truncate">{isAiClusteringOff ? "Requires AI Engine to be active" : "Configurable plugin active"}</div>
                                 </div>
                             </div>
                             <button
@@ -423,9 +450,14 @@
             };
 
             const loadLatestLog = async () => {
+                if (isFetchingLog) return;
+                setIsFetchingLog(true);
                 try {
-                    const res = await fetch(`${serverUrl}/api/latest_log`);
-                    if (!res.ok) return;
+                    const res = await fetch(`${serverUrl}/api/latest_log?t=${Date.now()}`);
+                    if (!res.ok) {
+                        setIsFetchingLog(false);
+                        return;
+                    }
                     const logInfo = await res.json();
 
                     // Fetch the actual CSV content
@@ -443,6 +475,8 @@
                     });
                 } catch (e) {
                     console.error("Failed to load latest log", e);
+                } finally {
+                    setIsFetchingLog(false);
                 }
             };
 
@@ -501,8 +535,13 @@
                 const finalParams = { ...aiParams, dry_run: !isRealRun };
                 // Override disabled plugins: send 0 for weights, false for bools
                 paramSchema.forEach(p => {
-                    if (p.is_plugin && enabledPlugins[p.key] === false) {
-                        finalParams[p.key] = p.type === 'bool' ? false : 0;
+                    if (p.is_plugin) {
+                        const isEnabled = enabledPlugins[p.key] !== false;
+                        if (p.type === 'bool') {
+                            finalParams[p.key] = isEnabled;
+                        } else if (!isEnabled) {
+                            finalParams[p.key] = 0;
+                        }
                     }
                 });
 
@@ -549,7 +588,7 @@
                             clearInterval(poll);
                             setIsRunning(false);
                         }
-                    }, 500); // Poll every 500ms for smooth logs
+                    }, 1000); // Polling every 1000ms for stability
 
                 } catch (e) {
                     alert("Failed to communicate with helper.");
@@ -840,28 +879,44 @@
                                     </div>
                                 )}
                                 {(() => {
-                                    const groupOrder = ['core', 'clustering', 'weights', 'other'];
+                                    const groupOrder = ['core', 'clustering', 'weights', 'name_grouping', 'other'];
                                     const sortedGroups = Object.entries(schemaGroups).sort((a, b) => {
                                         const idxA = groupOrder.indexOf(a[0]);
                                         const idxB = groupOrder.indexOf(b[0]);
                                         return (idxA === -1 ? 99 : idxA) - (idxB === -1 ? 99 : idxB);
                                     });
 
+                                    const sectionLabels = {
+                                        'core': 'Operation Pipeline',
+                                        'clustering': 'AI Strategy',
+                                        'weights': 'Feature Tuning (AI Weights)',
+                                        'name_grouping': 'Pattern Matching (No AI)',
+                                        'general': 'General'
+                                    };
+
+                                    const isAiEnabled = enabledPlugins['enable_ai_clustering'] !== false;
+
                                     return sortedGroups.map(([groupName, params]) => {
+                                        // Accordion: Hide AI-dependent groups if AI is disabled
+                                        const isFlatteningEnabled = enabledPlugins['enable_folder_flattening'] === true;
+                                        const isAiDependent = groupName === 'clustering' || groupName === 'weights';
+                                        const isNameGroup = groupName === 'name_grouping';
+
+                                        if (isAiDependent && !isAiEnabled) return null;
+                                        if (isNameGroup && isFlatteningEnabled) return null;
+
                                         const plugins = params.filter(p => p.is_plugin);
                                         const nonPlugins = params.filter(p => !p.is_plugin);
-                                        const labels = {
-                                            'core': 'Operation Pipeline',
-                                            'clustering': 'AI Strategy',
-                                            'weights': 'Feature Tuning (Plugins)',
-                                            'general': 'General'
-                                        };
+
                                         return (
                                             <div key={groupName}>
-                                                <div className="text-[8px] font-bold text-slate-600 uppercase tracking-[0.3em] mb-3">{labels[groupName] || groupName}</div>
+                                                <div className="text-[8px] font-bold text-slate-600 uppercase tracking-[0.3em] mb-3">{sectionLabels[groupName] || groupName}</div>
                                                 {nonPlugins.length > 0 && (
                                                     <div className="space-y-4 mb-4">
-                                                        {nonPlugins.map(p => renderParamControl(p))}
+                                                        {nonPlugins.map(p => {
+                                                            if (p.key === 'flatten_rename' && !isFlatteningEnabled) return null;
+                                                            return renderParamControl(p);
+                                                        })}
                                                     </div>
                                                 )}
                                                 {plugins.length > 0 && (

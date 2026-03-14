@@ -16,6 +16,9 @@ CURRENT_ROOT = Path.cwd()
 SCRIPT_DIR = Path(__file__).parent.resolve()  # Fixed: always points to the app's own directory
 IS_RUNNING = False
 PROGRESS_LOG = []
+SCHEMA_LOCK = threading.Lock()
+SCHEMA_CACHE = {"data": None, "time": 0}
+SCHEMA_CACHE_TTL = 2  # 2 second cache to prevent flood reloads
 
 class ThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     def handle_error(self, request, client_address):
@@ -90,7 +93,7 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                     # Stream the file in chunks instead of reading into memory
                     try:
                         with open(full_path, 'rb') as f:
-                            shutil.copyfileobj(f, self.wfile)
+                            shutil.copyfileobj(f, self.wfile, length=64*1024) # 64KB buffer
                         print(f"  [STREAM] {full_path} ({content_type})")
                     except (ConnectionAbortedError, ConnectionResetError):
                         # Expected when browser cancels a request (e.g. on scroll)
@@ -105,10 +108,21 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                 except: pass
         elif self.path == '/api/schema' or self.path.startswith('/api/schema?'):
             try:
-                import importlib
-                import media_organizer
-                importlib.reload(media_organizer)
-                self.send_json(200, media_organizer.PARAM_SCHEMA)
+                import time
+                now = time.time()
+                
+                with SCHEMA_LOCK:
+                    if SCHEMA_CACHE["data"] and (now - SCHEMA_CACHE["time"] < SCHEMA_CACHE_TTL):
+                        self.send_json(200, SCHEMA_CACHE["data"])
+                        return
+
+                    import importlib
+                    import media_organizer
+                    importlib.reload(media_organizer)
+                    
+                    SCHEMA_CACHE["data"] = media_organizer.PARAM_SCHEMA
+                    SCHEMA_CACHE["time"] = now
+                    self.send_json(200, media_organizer.PARAM_SCHEMA)
             except Exception as e:
                 self.send_json(500, {"error": str(e)})
         elif self.path == '/api/status_job':
