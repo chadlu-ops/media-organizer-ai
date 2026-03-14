@@ -165,7 +165,6 @@
             const [backendRoot, setBackendRoot] = useState("");
             const [isRootSyncing, setIsRootSyncing] = useState(false);
             const [isVirtualMode, setIsVirtualMode] = useState(false);
-            const [manualVirtualMode, setManualVirtualMode] = useState(false);
             const [selectedCluster, setSelectedCluster] = useState(null);
             const [gridSize, setGridSize] = useState(4);
             const [serverUrl, setServerUrl] = useState("http://localhost:8000");
@@ -175,18 +174,39 @@
             const [progressLog, setProgressLog] = useState([]);
             const [lightboxItem, setLightboxItem] = useState(null);
             const [showPathPrompt, setShowPathPrompt] = useState(false);
-            const [pendingRealRun, setPendingRealRun] = useState(false);
             const [showDiagPathPrompt, setShowDiagPathPrompt] = useState(false);
             const [diagPath, setDiagPath] = useState("");
             const [diagResult, setDiagResult] = useState(null);
             const [isDiagnosing, setIsDiagnosing] = useState(false);
+            const [isConsoleExpanded, setIsConsoleExpanded] = useState(false);
+            const [isTuningCollapsed, setIsTuningCollapsed] = useState(false);
+            const [isInventoryCollapsed, setIsInventoryCollapsed] = useState(false);
 
-            // Close lightbox on Escape key
+            // Lightbox navigation helpers
+            const lightboxNav = useCallback((direction) => {
+                if (!lightboxItem || !selectedCluster || !groups[selectedCluster]) return;
+                const items = groups[selectedCluster];
+                const currentIdx = items.findIndex(item =>
+                    (item.Original_Path || item.Old_Path || item.Source_Path) ===
+                    (lightboxItem.Original_Path || lightboxItem.Old_Path || lightboxItem.Source_Path)
+                );
+                if (currentIdx === -1) return;
+                const nextIdx = direction === 'next'
+                    ? (currentIdx + 1) % items.length
+                    : (currentIdx - 1 + items.length) % items.length;
+                setLightboxItem(items[nextIdx]);
+            }, [lightboxItem, selectedCluster, groups]);
+
+            // Keyboard: Escape closes, arrows navigate
             useEffect(() => {
-                const handleKey = (e) => { if (e.key === 'Escape') setLightboxItem(null); };
+                const handleKey = (e) => {
+                    if (e.key === 'Escape') setLightboxItem(null);
+                    if (lightboxItem && e.key === 'ArrowRight') lightboxNav('next');
+                    if (lightboxItem && e.key === 'ArrowLeft') lightboxNav('prev');
+                };
                 window.addEventListener('keydown', handleKey);
                 return () => window.removeEventListener('keydown', handleKey);
-            }, []);
+            }, [lightboxItem, lightboxNav]);
 
             // AI Tuning Parameters — initialized from schema
             const [paramSchema, setParamSchema] = useState([]);
@@ -371,6 +391,7 @@
             const schemaGroups = useMemo(() => {
                 const groups = {};
                 paramSchema.forEach(p => {
+                    if (p.key === 'dry_run') return; // Handled by Simulate/Execute buttons
                     const g = p.group || 'other';
                     if (!groups[g]) groups[g] = [];
                     groups[g].push(p);
@@ -474,7 +495,6 @@
                 }
 
                 setIsRunning(true);
-                setShowPathPrompt(false);
                 setProgressLog([]);
                 setSelectedCluster(null);
 
@@ -499,6 +519,9 @@
                         setIsRunning(false);
                         return;
                     }
+
+                    // Auto-expand console when scan starts
+                    setIsConsoleExpanded(true);
 
                     // Start polling for completion & progress
                     const poll = setInterval(async () => {
@@ -611,7 +634,7 @@
                 const origPath = item.Original_Path || item.Old_Path || item.Source_Path;
                 const newPath = item.New_Path || item.Destination_Path;
 
-                if ((isVirtualMode || manualVirtualMode) && origPath) {
+                if (isVirtualMode && origPath) {
                     const absPath = origPath.replace(/\\/g, "/");
                     return `${serverUrl}/_abs/${encodeURIComponent(absPath)}`;
                 }
@@ -636,52 +659,67 @@
                 return `${serverUrl}/${rel.split('/').map(encodeURIComponent).join('/')}`;
             };
 
-            if (data.length === 0) {
-                return (
-                    <div className="min-h-screen flex flex-col items-center justify-center p-6 text-center">
-                        <div className="glass p-12 rounded-3xl amber-glow max-w-lg">
-                            <h1 className="text-4xl font-bold mb-4 bg-gradient-to-r from-amber-400 to-orange-500 bg-clip-text text-transparent">
-                                Media Visualizer
-                            </h1>
-                            <p className="text-slate-400 mb-8 leading-relaxed italic">
-                                Preview. Tune. Commit.
-                            </p>
+            const EmptyState = () => (
+                <div className="flex-1 flex flex-col items-center justify-center p-6 text-center">
+                    <div className="glass p-12 rounded-3xl amber-glow max-w-lg animate-in fade-in zoom-in duration-500">
+                        <h1 className="text-4xl font-bold mb-4 bg-gradient-to-r from-amber-400 to-orange-500 bg-clip-text text-transparent">
+                            Media Visualizer
+                        </h1>
+                        <p className="text-slate-400 mb-8 leading-relaxed italic">
+                            Simulate groupings to verify tuning before processing files.
+                        </p>
 
-                            <div className="flex flex-col gap-4">
-                                <button
-                                    onClick={loadLatestLog}
-                                    className="bg-slate-800 hover:bg-slate-700 text-white font-bold py-4 px-8 rounded-2xl transition-all flex items-center justify-center gap-2 border border-slate-700"
-                                >
-                                    <i data-lucide="refresh-cw" className="w-5 h-5"></i>
-                                    Load Latest Results
-                                </button>
-
-                                <label className="cursor-pointer bg-slate-900/50 hover:bg-slate-900 text-slate-400 py-3 px-8 rounded-2xl transition-all border border-slate-700/50 flex items-center justify-center gap-2 text-sm">
-                                    <i data-lucide="upload" className="w-4 h-4"></i>
-                                    Upload Specific CSV
-                                    <input type="file" className="hidden" accept=".csv" onChange={handleFileUpload} />
-                                </label>
-
-                                <div className="mt-8 bg-slate-900/50 p-6 rounded-2xl border border-slate-700/30 text-left">
-                                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest block mb-2">Media Scan Directory</span>
-                                    <input
-                                        className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-slate-300 focus:outline-none focus:border-amber-500/50 mb-3"
-                                        placeholder="D:/Photos/unsorted/..."
-                                        value={organizedPath}
-                                        onChange={(e) => setOrganizedPath(e.target.value)}
-                                    />
+                        <div className="flex flex-col gap-6">
+                            <div className="bg-slate-900/50 p-6 rounded-2xl border border-slate-700/30 text-left space-y-3">
+                                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest block">Media Source Folder</span>
+                                <input
+                                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-sm font-mono text-slate-300 focus:outline-none focus:border-amber-500/50"
+                                    placeholder="E:/Media/Disorganized..."
+                                    value={organizedPath}
+                                    onChange={(e) => setOrganizedPath(e.target.value)}
+                                    onBlur={() => updateBackendRoot(organizedPath)}
+                                />
+                                <div className="grid grid-cols-2 gap-3 pt-2">
                                     <button
-                                        onClick={() => updateBackendRoot(organizedPath)}
-                                        className="w-full bg-amber-500 hover:bg-amber-600 text-white font-bold py-2 rounded-lg text-xs transition-colors"
+                                        onClick={() => runOrganizer(false)}
+                                        disabled={!organizedPath || isRunning}
+                                        className="bg-amber-500 hover:bg-amber-400 text-white font-black py-3 rounded-xl text-[10px] uppercase tracking-widest transition-all shadow-lg shadow-amber-500/10 active:scale-95 flex items-center justify-center gap-2"
                                     >
-                                        Set Scan Directory
+                                        <i data-lucide="play" className="w-3.5 h-3.5"></i>
+                                        Simulate Scan
+                                    </button>
+                                    <button
+                                        onClick={() => runOrganizer(true)}
+                                        disabled={!organizedPath || isRunning}
+                                        className="bg-indigo-600 hover:bg-indigo-500 text-white font-black py-3 rounded-xl text-[10px] uppercase tracking-widest transition-all shadow-lg shadow-indigo-500/10 active:scale-95 flex items-center justify-center gap-2"
+                                    >
+                                        <i data-lucide="zap" className="w-3.5 h-3.5"></i>
+                                        Live Run
                                     </button>
                                 </div>
                             </div>
+
+                            <div className="h-px bg-slate-800 w-full"></div>
+
+                            <div className="grid grid-cols-2 gap-4">
+                                <button
+                                    onClick={loadLatestLog}
+                                    className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold py-3 px-4 rounded-xl transition-all border border-slate-700 flex items-center justify-center gap-2 text-xs active:scale-95"
+                                >
+                                    <i data-lucide="history" className="w-4 h-4 text-amber-500/70"></i>
+                                    Recent Run
+                                </button>
+
+                                <label className="cursor-pointer bg-slate-800 hover:bg-slate-700 text-slate-300 py-3 px-4 rounded-xl transition-all border border-slate-700 flex items-center justify-center gap-2 text-xs font-bold active:scale-95">
+                                    <i data-lucide="file-up" className="w-4 h-4 text-amber-500/70"></i>
+                                    Open Log
+                                    <input type="file" className="hidden" accept=".csv" onChange={handleFileUpload} />
+                                </label>
+                            </div>
                         </div>
                     </div>
-                );
-            }
+                </div>
+            );
 
             const clusterKeys = Object.keys(groups).sort((a, b) => {
                 if (a === "noise") return 1;
@@ -699,8 +737,16 @@
             return (
                 <div className="flex h-screen overflow-hidden text-slate-300">
                     {/* Left Sidebar: Controls \u0026 Tuning */}
-                    <aside className="w-80 bg-[#0c1222] border-r border-slate-800 flex flex-col overflow-hidden shadow-2xl z-20">
-                        <div className="p-6 border-b border-white/5 bg-gradient-to-b from-slate-900/50 to-transparent">
+                    <aside className={`${isTuningCollapsed ? 'w-14' : 'w-80'} bg-[#0c1222] border-r border-slate-800 flex flex-col overflow-hidden shadow-2xl z-20 transition-all duration-300 relative`}>
+                        {/* Collapse Toggle */}
+                        <button
+                            onClick={() => setIsTuningCollapsed(!isTuningCollapsed)}
+                            className="absolute top-3 right-0 translate-x-1/2 z-30 w-5 h-10 bg-slate-800 hover:bg-amber-500/20 border border-slate-700 hover:border-amber-500/40 rounded-full flex items-center justify-center transition-all group"
+                            title={isTuningCollapsed ? 'Expand Tuning Lab' : 'Collapse Tuning Lab'}
+                        >
+                            <i data-lucide={isTuningCollapsed ? 'chevron-right' : 'chevron-left'} className="w-3 h-3 text-slate-500 group-hover:text-amber-400 transition-colors"></i>
+                        </button>
+                        <div className={`p-6 border-b border-white/5 bg-gradient-to-b from-slate-900/50 to-transparent ${isTuningCollapsed ? 'hidden' : ''}`}>
                             <div className="flex items-center gap-3 mb-6">
                                 <div className="w-10 h-10 bg-gradient-to-br from-amber-400 to-orange-600 rounded-xl flex items-center justify-center shadow-lg shadow-amber-500/20">
                                     <i data-lucide="sliders" className="text-white w-5 h-5"></i>
@@ -708,61 +754,48 @@
                                 <h2 className="text-lg font-bold text-white tracking-tight">Tuning Lab</h2>
                             </div>
 
-                            {/* Run Controls */}
-                            <div className="flex flex-col gap-3">
-                                {!showPathPrompt ? (
-                                    <>
-                                        <button
-                                            onClick={() => { setShowPathPrompt(true); setPendingRealRun(false); }}
-                                            disabled={isRunning}
-                                            className={`w-full ${isRunning ? 'bg-slate-800' : 'bg-amber-500 hover:bg-amber-400 shadow-lg shadow-amber-500/10'} text-white font-bold py-3 rounded-xl transition-all flex items-center justify-center gap-2 text-sm uppercase tracking-wider`}
-                                        >
-                                            <i data-lucide={isRunning ? "loader-2" : "play"} className={`w-4 h-4 ${isRunning ? 'animate-spin' : ''}`}></i>
-                                            {isRunning ? "Running AI..." : "Update Preview"}
-                                        </button>
-
-                                        {!isVirtualMode && (
-                                            <button
-                                                onClick={() => { setShowPathPrompt(true); setPendingRealRun(true); }}
-                                                className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-2 rounded-xl transition-all text-xs uppercase tracking-widest border border-indigo-400/20 flex items-center justify-center gap-2"
-                                            >
-                                                <i data-lucide="zap" className="w-3 h-3"></i>
-                                                Commit Changes (Permanent)
-                                            </button>
-                                        )}
-                                    </>
-                                ) : (
-                                    <div className="bg-slate-900/60 p-4 rounded-xl border border-amber-500/20 space-y-3">
-                                        <div className="text-[9px] font-bold text-amber-400 uppercase tracking-widest">Media Scan Directory</div>
-                                        <input
-                                            className="w-full bg-black/30 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-slate-300 focus:outline-none focus:border-amber-500/50"
-                                            placeholder="D:/Photos/unsorted/..."
-                                            value={organizedPath}
-                                            onChange={(e) => setOrganizedPath(e.target.value)}
-                                            autoFocus
-                                        />
-                                        <div className="flex gap-2">
-                                            <button
-                                                onClick={() => runOrganizer(pendingRealRun)}
-                                                disabled={!organizedPath}
-                                                className={`flex-1 ${organizedPath ? 'bg-amber-500 hover:bg-amber-400' : 'bg-slate-700 cursor-not-allowed'} text-white font-bold py-2 rounded-lg text-xs uppercase tracking-wider transition-all flex items-center justify-center gap-1`}
-                                            >
-                                                <i data-lucide="play" className="w-3 h-3"></i>
-                                                {pendingRealRun ? 'Commit' : 'Run Scan'}
-                                            </button>
-                                            <button
-                                                onClick={() => setShowPathPrompt(false)}
-                                                className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-400 rounded-lg text-xs transition-colors"
-                                            >
-                                                Cancel
-                                            </button>
-                                        </div>
+                            {/* Action Panel */}
+                            <div className="flex flex-col gap-4 bg-slate-900/40 p-5 rounded-2xl border border-white/5 shadow-inner">
+                                <div className="space-y-2">
+                                    <div className="flex items-center justify-between">
+                                        <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Media Source Folder</span>
+                                        {isRootSyncing && <i data-lucide="loader-2" className="w-3 h-3 text-amber-500 animate-spin"></i>}
                                     </div>
-                                )}
+                                    <input
+                                        className="w-full bg-black/40 border border-slate-700/50 rounded-xl px-3 py-2.5 text-[10px] font-mono text-slate-400 focus:outline-none focus:border-amber-500/30 transition-all font-bold"
+                                        placeholder="E:/Media/Organize..."
+                                        value={organizedPath}
+                                        onChange={(e) => setOrganizedPath(e.target.value)}
+                                        onBlur={() => updateBackendRoot(organizedPath)}
+                                    />
+                                </div>
+
+                                <div className="grid gap-2">
+                                    <button
+                                        onClick={() => runOrganizer(false)}
+                                        disabled={isRunning || !organizedPath}
+                                        className={`w-full py-3.5 rounded-xl font-black text-[10px] uppercase tracking-[0.2em] transition-all flex items-center justify-center gap-3 ${isRunning ? 'bg-slate-800 text-slate-600' : 'bg-amber-500 hover:bg-amber-400 text-white shadow-lg shadow-amber-500/10 active:scale-[0.98]'}`}
+                                    >
+                                        <i data-lucide={isRunning ? "loader-2" : "play"} className={`w-4 h-4 ${isRunning ? 'animate-spin' : ''}`}></i>
+                                        {isRunning ? "Processing..." : "Simulate Scan (Dry Run)"}
+                                    </button>
+
+                                    <button
+                                        onClick={() => runOrganizer(true)}
+                                        disabled={isRunning || !organizedPath}
+                                        className={`w-full py-2.5 rounded-xl font-bold text-[9px] uppercase tracking-widest transition-all flex items-center justify-center gap-2 ${isRunning ? 'bg-slate-800/50 text-slate-700' : 'bg-indigo-600 hover:bg-indigo-500 text-white border border-indigo-400/20 active:scale-[0.98]'}`}
+                                    >
+                                        <i data-lucide="zap" className={`w-3.5 h-3.5 ${isRunning ? 'opacity-20' : ''}`}></i>
+                                        Commit Changes (Live)
+                                    </button>
+                                </div>
+                                <p className="text-[8px] text-slate-600 leading-relaxed text-center px-2 italic">
+                                    Simulate first to verify groupings. Commit will permanently move/copy files.
+                                </p>
                             </div>
                         </div>
 
-                        <div className="flex-1 overflow-y-auto p-6 space-y-8 scrollbar-thin">
+                        <div className={`flex-1 overflow-y-auto p-6 space-y-8 scrollbar-thin ${isTuningCollapsed ? 'hidden' : ''}`}>
                             {/* Parameters */}
                             <section>
                                 <div className="flex items-center justify-between text-[10px] font-bold text-slate-500 uppercase tracking-[0.2em] mb-4">
@@ -844,29 +877,31 @@
 
                             {/* Workspace */}
                             <section>
-                                <div className="text-[10px] font-bold text-slate-500 uppercase tracking-[0.2em] mb-4">Workspace</div>
-                                <div className="bg-slate-900/40 p-3 rounded-2xl border border-white/5 flex flex-col gap-3">
-                                    <div className="flex items-center justify-between text-[9px] font-bold uppercase">
+                                <div className="flex items-center justify-between text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] mb-4">
+                                    <span>Workspace</span>
+                                    <i data-lucide="hard-drive" className="w-3 h-3 opacity-50"></i>
+                                </div>
+                                <div className="bg-slate-900/40 p-4 rounded-2xl border border-white/5 flex flex-col gap-4 shadow-inner">
+                                    <div className="flex items-center justify-between text-[9px] font-black uppercase tracking-widest">
                                         <span className="text-slate-500">Virtual Mode</span>
-                                        <button
-                                            onClick={() => setManualVirtualMode(!manualVirtualMode)}
-                                            className={`w-8 h-4 rounded-full transition-colors relative ${manualVirtualMode || isVirtualMode ? 'bg-indigo-500' : 'bg-slate-700'}`}
-                                        >
-                                            <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${manualVirtualMode || isVirtualMode ? 'left-4' : 'left-0.5'}`}></div>
-                                        </button>
+                                        <div className={`flex items-center gap-2 ${isVirtualMode ? 'text-amber-500' : 'text-slate-600'}`}>
+                                            <span className="text-[8px]">{isVirtualMode ? 'ACTIVE' : 'OFF'}</span>
+                                            <div className={`w-1.5 h-1.5 rounded-full ${isVirtualMode ? 'bg-amber-500 animate-pulse shadow-[0_0_5px_rgba(245,158,11,0.5)]' : 'bg-slate-700'}`}></div>
+                                        </div>
                                     </div>
-                                    <input
-                                        className="w-full bg-black/20 border border-slate-700/50 rounded-lg px-2 py-2 text-[10px] font-mono text-slate-400 focus:outline-none focus:border-amber-500/30"
-                                        placeholder="Path..."
-                                        value={organizedPath}
-                                        onChange={(e) => setOrganizedPath(e.target.value)}
-                                    />
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <button onClick={loadLatestLog} className="py-2.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-[9px] font-black text-slate-300 uppercase tracking-widest transition-all active:scale-95">Latest</button>
+                                        <label className="py-2.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-[9px] font-black text-slate-300 uppercase tracking-widest text-center cursor-pointer transition-all active:scale-95">
+                                            Open
+                                            <input type="file" className="hidden" accept=".csv" onChange={handleFileUpload} />
+                                        </label>
+                                    </div>
                                 </div>
                             </section>
                         </div>
 
                         {/* Summary Footer */}
-                        <div className="p-6 bg-black/20 border-t border-white/5 grid grid-cols-2 gap-3">
+                        <div className={`p-6 bg-black/20 border-t border-white/5 grid grid-cols-2 gap-3 ${isTuningCollapsed ? 'hidden' : ''}`}>
                             <div className="bg-slate-900/50 p-3 rounded-xl border border-white/5">
                                 <span className="text-[9px] text-slate-500 font-bold uppercase block mb-1">Items</span>
                                 <span className="text-lg font-black text-white leading-none">{stats.totalFiles}</span>
@@ -876,288 +911,376 @@
                                 <span className="text-lg font-black text-white leading-none">{stats.clusters}</span>
                             </div>
                         </div>
+
+                        {/* Collapsed State Icon */}
+                        {isTuningCollapsed && (
+                            <div className="flex-1 flex flex-col items-center pt-6 gap-4">
+                                <div className="w-8 h-8 bg-gradient-to-br from-amber-400 to-orange-600 rounded-lg flex items-center justify-center shadow-lg shadow-amber-500/20">
+                                    <i data-lucide="sliders" className="text-white w-4 h-4"></i>
+                                </div>
+                                <span className="text-[8px] font-black text-slate-600 uppercase tracking-widest [writing-mode:vertical-lr] rotate-180">Tuning Lab</span>
+                            </div>
+                        )}
                     </aside >
 
                     {/* Navigation Sidebar: Groups */}
-                    < nav className="w-64 bg-[#0a0f1d] border-r border-slate-800 flex flex-col h-full overflow-hidden" >
-                        <div className="p-4 border-b border-white/5 flex items-center justify-between">
-                            <span className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-600">Inventory</span>
-                            <div className="p-1 bg-amber-500/10 rounded flex items-center text-amber-500 text-[8px] font-bold">
-                                {stats.clusters} NEW
+                    <nav className={`${isInventoryCollapsed ? 'w-14' : 'w-64'} bg-[#0a0f1d] border-r border-slate-800 flex flex-col h-full overflow-hidden transition-all duration-300 relative`}>
+                        {/* Collapse Toggle */}
+                        <button
+                            onClick={() => setIsInventoryCollapsed(!isInventoryCollapsed)}
+                            className="absolute top-3 right-0 translate-x-1/2 z-30 w-5 h-10 bg-slate-800 hover:bg-amber-500/20 border border-slate-700 hover:border-amber-500/40 rounded-full flex items-center justify-center transition-all group"
+                            title={isInventoryCollapsed ? 'Expand Inventory' : 'Collapse Inventory'}
+                        >
+                            <i data-lucide={isInventoryCollapsed ? 'chevron-right' : 'chevron-left'} className="w-3 h-3 text-slate-500 group-hover:text-amber-400 transition-colors"></i>
+                        </button>
+
+                        {!isInventoryCollapsed ? (
+                            <>
+                                <div className="p-4 border-b border-white/5 flex items-center justify-between">
+                                    <span className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-600">Inventory</span>
+                                    <div className="p-1 bg-amber-500/10 rounded flex items-center text-amber-500 text-[8px] font-bold">
+                                        {stats.clusters} NEW
+                                    </div>
+                                </div>
+                                <div className="flex-1 overflow-y-auto p-4 space-y-2 scrollbar-none">
+                                    {clusterKeys.map(key => {
+                                        const isSelected = selectedCluster === key;
+                                        const count = groups[key].length;
+                                        const isNoise = key === "noise";
+                                        const isDup = key === "duplicate";
+                                        const isVideo = key.startsWith("video/");
+
+                                        let label = key;
+                                        if (isNoise) label = "Unsorted";
+                                        if (isDup) label = "Deduplicated";
+                                        if (isVideo) label = key.replace("video/", "");
+
+                                        return (
+                                            <button
+                                                key={key}
+                                                onClick={() => setSelectedCluster(key)}
+                                                className={`w-full p-3 rounded-xl text-left transition-all flex items-center justify-between group relative overflow-hidden ${isSelected ? 'bg-amber-500/10 text-amber-500 border border-amber-500/30' : 'hover:bg-slate-800/50 text-slate-400 border border-transparent'
+                                                    }`}
+                                            >
+                                                <div className="flex items-center gap-3 relative z-10">
+                                                    <i data-lucide={isNoise ? "help-circle" : (isDup ? "copy" : (isVideo ? "video" : "folder"))} className={`w-3.5 h-3.5 ${isSelected ? "text-amber-500" : "text-slate-600"}`}></i>
+                                                    <span className="text-xs font-bold leading-none truncate max-w-[120px]">{label}</span>
+                                                </div>
+                                                <span className={`text-[9px] font-black px-1.5 py-0.5 rounded border relative z-10 ${isSelected ? "bg-amber-500 text-white border-amber-400" : "bg-slate-900 border-slate-700 text-slate-500"}`}>
+                                                    {count}
+                                                </span>
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            </>
+                        ) : (
+                            <div className="flex-1 overflow-y-auto py-4 flex flex-col items-center gap-1 scrollbar-none">
+                                <div className="mb-3 pb-3 border-b border-white/5 w-full flex justify-center">
+                                    <div className="p-1.5 bg-amber-500/10 rounded text-amber-500 text-[7px] font-black">
+                                        {stats.clusters}
+                                    </div>
+                                </div>
+                                {clusterKeys.map(key => {
+                                    const isSelected = selectedCluster === key;
+                                    const isNoise = key === "noise";
+                                    const isDup = key === "duplicate";
+                                    const isVideo = key.startsWith("video/");
+                                    return (
+                                        <button
+                                            key={key}
+                                            onClick={() => setSelectedCluster(key)}
+                                            className={`w-9 h-9 rounded-lg flex items-center justify-center transition-all ${isSelected ? 'bg-amber-500/15 text-amber-500 border border-amber-500/30' : 'hover:bg-slate-800/50 text-slate-600 border border-transparent hover:text-slate-400'}`}
+                                            title={key}
+                                        >
+                                            <i data-lucide={isNoise ? "help-circle" : (isDup ? "copy" : (isVideo ? "video" : "folder"))} className="w-3.5 h-3.5"></i>
+                                        </button>
+                                    );
+                                })}
                             </div>
-                        </div>
-                        <div className="flex-1 overflow-y-auto p-4 space-y-2 scrollbar-none">
-                            {clusterKeys.map(key => {
-                                const isSelected = selectedCluster === key;
-                                const count = groups[key].length;
-                                const isNoise = key === "noise";
-                                const isDup = key === "duplicate";
-                                const isVideo = key.startsWith("video/");
-
-                                let label = key;
-                                if (isNoise) label = "Unsorted";
-                                if (isDup) label = "Deduplicated";
-                                if (isVideo) label = key.replace("video/", "");
-
-                                return (
-                                    <button
-                                        key={key}
-                                        onClick={() => setSelectedCluster(key)}
-                                        className={`w-full p-3 rounded-xl text-left transition-all flex items-center justify-between group relative overflow-hidden ${isSelected ? 'bg-amber-500/10 text-amber-500 border border-amber-500/30' : 'hover:bg-slate-800/50 text-slate-400 border border-transparent'
-                                            }`}
-                                    >
-                                        <div className="flex items-center gap-3 relative z-10">
-                                            <i data-lucide={isNoise ? "help-circle" : (isDup ? "copy" : (isVideo ? "video" : "folder"))} className={`w-3.5 h-3.5 ${isSelected ? "text-amber-500" : "text-slate-600"}`}></i>
-                                            <span className="text-xs font-bold leading-none truncate max-w-[120px]">{label}</span>
-                                        </div>
-                                        <span className={`text-[9px] font-black px-1.5 py-0.5 rounded border relative z-10 ${isSelected ? "bg-amber-500 text-white border-amber-400" : "bg-slate-900 border-slate-700 text-slate-500"}`}>
-                                            {count}
-                                        </span>
-                                    </button>
-                                );
-                            })}
-                        </div>
-                    </nav >
+                        )}
+                    </nav>
 
                     {/* Main Workspace */}
-                    < main className="flex-1 flex flex-col bg-[#050914] relative overflow-hidden" >
-                        {
-                            selectedCluster ? (
-                                <div className="flex flex-col h-full" >
-                                    <header className="p-10 pb-6 flex justify-between items-end backdrop-blur-xl bg-slate-950/20 border-b border-white/5">
-                                        <div>
-                                            <div className="flex items-center gap-2 text-amber-500 text-[10px] font-black uppercase tracking-[0.3em] mb-3">
-                                                <div className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></div>
-                                                Group Resolution
-                                            </div>
-                                            <h1 className="text-5xl font-black text-white tracking-tighter capitalize leading-none">{selectedCluster.replace("_", " ")}</h1>
-                                            <div className="flex gap-4 mt-6">
-                                                <div className="flex flex-col">
-                                                    <span className="text-[9px] font-bold uppercase text-slate-600">Populated</span>
-                                                    <span className="text-sm font-bold text-slate-400">{groups[selectedCluster].length} Files</span>
-                                                </div>
-                                                <div className="w-[1px] h-full bg-slate-800"></div>
-                                                <div className="flex flex-col">
-                                                    <span className="text-[9px] font-bold uppercase text-slate-600">Diagnostic</span>
-                                                    <span className="text-sm font-bold text-slate-400 truncate max-w-[300px]">{groups[selectedCluster][0].Reason || "Organic grouping"}</span>
-                                                </div>
-                                                <div className="w-[1px] h-full bg-slate-800"></div>
-                                                <button
-                                                    onClick={() => window.open(`explorer.html?anchor=${selectedCluster}`, '_blank')}
-                                                    className="self-end px-6 py-2 bg-amber-500 text-black rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-white transition-all flex items-center gap-2 shadow-[0_0_20px_rgba(245,158,11,0.2)]"
-                                                >
-                                                    <i data-lucide="cloud" className="w-4 h-4"></i>
-                                                    Cloud Explorer
-                                                </button>
-                                            </div>
+                    <main className="flex-1 flex flex-col bg-[#050914] relative overflow-hidden">
+                        {data.length === 0 ? (
+                            <EmptyState />
+                        ) : selectedCluster ? (
+                            <div className="flex-1 flex flex-col overflow-hidden">
+                                <header className="p-10 pb-6 flex justify-between items-end backdrop-blur-xl bg-slate-950/20 border-b border-white/5">
+                                    <div>
+                                        <div className="flex items-center gap-2 text-amber-500 text-[10px] font-black uppercase tracking-[0.3em] mb-3">
+                                            <div className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></div>
+                                            Group Resolution
                                         </div>
-
-                                        <div className="flex items-center gap-4 bg-slate-900/50 p-1.5 rounded-2xl border border-white/5">
-                                            <button onClick={() => setGridSize(Math.max(1, gridSize - 1))} className="p-3 hover:bg-slate-800 rounded-xl transition-colors"><i data-lucide="minus" className="w-4 h-4"></i></button>
-                                            <span className="text-xs font-black min-w-[60px] text-center">{gridSize} COLUMNS</span>
-                                            <button onClick={() => setGridSize(Math.min(12, gridSize + 1))} className="p-3 hover:bg-slate-800 rounded-xl transition-colors"><i data-lucide="plus" className="w-4 h-4"></i></button>
-                                        </div>
-                                    </header>
-
-                                    <div className="flex-1 overflow-y-auto p-10 scrollbar-thin">
-                                        <div
-                                            key={selectedCluster}
-                                            className="grid gap-8"
-                                            style={{ gridTemplateColumns: `repeat(${gridSize}, minmax(0, 1fr))` }}
-                                        >
-                                            {groups[selectedCluster].map((item) => (
-                                                <MediaCard
-                                                    key={item.Original_Path || item.Old_Path || item.Source_Path || Math.random()}
-                                                    item={item}
-                                                    getImageUrl={getImageUrl}
-                                                    onImageClick={setLightboxItem}
-                                                />
-                                            ))}
+                                        <h1 className="text-5xl font-black text-white tracking-tighter capitalize leading-none">{selectedCluster.replace("_", " ")}</h1>
+                                        <div className="flex gap-4 mt-6">
+                                            <div className="flex flex-col">
+                                                <span className="text-[9px] font-bold uppercase text-slate-600">Populated</span>
+                                                <span className="text-sm font-bold text-slate-400">{groups[selectedCluster].length} Files</span>
+                                            </div>
+                                            <div className="w-[1px] h-full bg-slate-800"></div>
+                                            <div className="flex flex-col">
+                                                <span className="text-[9px] font-bold uppercase text-slate-600">Diagnostic</span>
+                                                <span className="text-sm font-bold text-slate-400 truncate max-w-[300px]">{groups[selectedCluster][0].Reason || "Organic grouping"}</span>
+                                            </div>
+                                            <div className="w-[1px] h-full bg-slate-800"></div>
+                                            <button
+                                                onClick={() => window.open(`explorer.html?anchor=${selectedCluster}`, '_blank')}
+                                                className="self-end px-6 py-2 bg-amber-500 text-black rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-white transition-all flex items-center gap-2 shadow-[0_0_20px_rgba(245,158,11,0.2)]"
+                                            >
+                                                <i data-lucide="cloud" className="w-4 h-4"></i>
+                                                Cloud Explorer
+                                            </button>
                                         </div>
                                     </div>
-                                </div>
-                            ) : (
-                                <div className="flex-1 flex flex-col items-center justify-center p-20">
-                                    <div className="w-32 h-32 rounded-full border border-white/5 flex items-center justify-center mb-8 relative">
-                                        <div className="absolute inset-0 rounded-full border-2 border-amber-500/20 border-t-amber-500 animate-spin"></div>
-                                        <i data-lucide="crosshair" className="w-12 h-12 text-slate-800"></i>
-                                    </div>
-                                    <h1 className="text-xl font-black text-slate-700 uppercase tracking-[0.5em]">Target Selection Required</h1>
-                                    <p className="text-xs text-slate-800 mt-4 max-w-xs text-center leading-relaxed">Choose a data cluster from the sidebar to inspect the AI's grouping logic and visual relevance.</p>
-                                </div>
-                            )
-                        }
 
-                        {/* Status Footer */}
-                        <footer className="h-10 bg-[#070c18] border-t border-white/5 flex items-center justify-between px-6 text-[9px] font-black uppercase tracking-widest text-slate-600">
-                            <div className="flex gap-6 items-center">
-                                <div className="flex items-center gap-2">
-                                    <div className={`w-1.5 h-1.5 rounded-full ${serverStatus === 'connected' ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]' : 'bg-rose-500 animate-pulse'}`}></div>
-                                    {serverStatus === 'connected' ? 'Core Online' : 'Core Disconnected'}
+                                    <div className="flex items-center gap-4 bg-slate-900/50 p-1.5 rounded-2xl border border-white/5">
+                                        <button onClick={() => setGridSize(Math.max(1, gridSize - 1))} className="p-3 hover:bg-slate-800 rounded-xl transition-colors"><i data-lucide="minus" className="w-4 h-4"></i></button>
+                                        <span className="text-xs font-black min-w-[60px] text-center">{gridSize} COLUMNS</span>
+                                        <button onClick={() => setGridSize(Math.min(12, gridSize + 1))} className="p-3 hover:bg-slate-800 rounded-xl transition-colors"><i data-lucide="plus" className="w-4 h-4"></i></button>
+                                    </div>
+                                </header>
+
+                                <div className="flex-1 overflow-y-auto p-10 scrollbar-thin">
+                                    <div
+                                        key={selectedCluster}
+                                        className="grid gap-8"
+                                        style={{ gridTemplateColumns: `repeat(${gridSize}, minmax(0, 1fr))` }}
+                                    >
+                                        {groups[selectedCluster].map((item) => (
+                                            <MediaCard
+                                                key={item.Original_Path || item.Old_Path || item.Source_Path || Math.random()}
+                                                item={item}
+                                                getImageUrl={getImageUrl}
+                                                onImageClick={setLightboxItem}
+                                            />
+                                        ))}
+                                    </div>
                                 </div>
-                                <div className="opacity-40">Build 03.01.2026.R2</div>
                             </div>
-                            <div className="flex items-center gap-4">
-                                <span className="opacity-40">Mounted:</span>
-                                <span className="text-amber-500/70 font-mono lower-case tracking-normal">{backendRoot || 'none'}</span>
+                        ) : (
+                            <div className="flex-1 flex flex-col items-center justify-center p-20">
+                                <div className="w-32 h-32 rounded-full border border-white/5 flex items-center justify-center mb-8 relative">
+                                    <div className="absolute inset-0 rounded-full border-2 border-amber-500/20 border-t-amber-500 animate-spin"></div>
+                                    <i data-lucide="crosshair" className="w-12 h-12 text-slate-800"></i>
+                                </div>
+                                <h1 className="text-xl font-black text-slate-700 uppercase tracking-[0.5em]">Target Selection Required</h1>
+                                <p className="text-xs text-slate-800 mt-4 max-w-xs text-center leading-relaxed">Choose a data cluster from the sidebar to inspect the AI's grouping logic and visual relevance.</p>
+                            </div>
+                        )}
+
+                        {/* Unified Status & Console Footer */}
+                        <footer
+                            className={`bg-[#070c18]/95 backdrop-blur-xl border-t border-white/5 transition-all duration-500 ease-in-out flex flex-col shadow-[0_-20px_50px_rgba(0,0,0,0.5)] ${isConsoleExpanded ? 'h-80' : 'h-10'}`}
+                        >
+                            {/* Status Bar (Header) */}
+                            <div className="h-10 shrink-0 flex items-center justify-between px-6 text-[9px] font-black uppercase tracking-widest text-slate-600 border-b border-white/5">
+                                <div className="flex gap-6 items-center">
+                                    <div className="flex items-center gap-2">
+                                        <div className={`w-1.5 h-1.5 rounded-full ${serverStatus === 'connected' ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]' : 'bg-rose-500 animate-pulse'}`}></div>
+                                        {serverStatus === 'connected' ? 'Core Online' : 'Core Disconnected'}
+                                    </div>
+                                    <div className="flex items-center gap-6">
+                                        <button
+                                            onClick={() => setIsConsoleExpanded(!isConsoleExpanded)}
+                                            className={`flex items-center gap-2 px-3 py-1 rounded-lg transition-all ${isConsoleExpanded ? 'bg-amber-500/20 text-amber-500' : 'bg-slate-800 text-slate-500 hover:text-slate-300'}`}
+                                        >
+                                            <i data-lucide="terminal" className="w-3.5 h-3.5"></i>
+                                            <span className="text-[9px] font-black uppercase tracking-widest">Console</span>
+                                            <i data-lucide={isConsoleExpanded ? "chevron-down" : "chevron-up"} className="w-3 h-3 ml-1"></i>
+                                        </button>
+                                        <div className="flex items-center gap-2">
+                                            <span className="opacity-40">Status:</span>
+                                            {isRunning ? (
+                                                <div className="flex items-center gap-2">
+                                                    <div className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></div>
+                                                    <span className="text-amber-500 font-bold uppercase text-[9px] tracking-widest">Processing...</span>
+                                                </div>
+                                            ) : (
+                                                <div className="flex items-center gap-2 opacity-40">
+                                                    <div className="w-1.5 h-1.5 rounded-full bg-slate-600"></div>
+                                                    <span className="uppercase text-[9px] tracking-widest font-bold">Idle</span>
+                                                </div>
+                                            )}
+                                        </div>
+                                        <div className="h-4 w-px bg-white/5"></div>
+                                        <div className="opacity-40 whitespace-nowrap">Build 03.14.2026</div>
+                                    </div>
+                                </div>
+                                <div className="flex items-center gap-4">
+                                    <span className="opacity-40">Mounted:</span>
+                                    <span className="text-amber-500/70 font-mono lower-case tracking-normal truncate max-w-[200px]">{backendRoot || 'none'}</span>
+                                </div>
+                            </div>
+
+                            {/* Console Output (Body) */}
+                            <div className={`flex-1 overflow-hidden transition-opacity duration-300 ${isConsoleExpanded ? 'opacity-100' : 'opacity-0'}`}>
+                                <div className="h-full p-6 font-mono text-[10px] text-slate-400 overflow-y-auto scrollbar-thin bg-black/20 flex flex-col items-start gap-1">
+                                    {progressLog.length === 0 ? (
+                                        <div className="text-slate-700 animate-pulse text-center w-full my-auto text-xs uppercase tracking-[0.2em] font-black">Initializing Backend Link...</div>
+                                    ) : (
+                                        progressLog.map((line, i) => {
+                                            const isError = line.toLowerCase().includes("error") || line.toLowerCase().includes("failed");
+                                            const isSuccess = line.includes("successfully");
+                                            let colorClass = "text-slate-400";
+                                            if (isError) colorClass = "text-rose-500 font-bold";
+                                            if (isSuccess) colorClass = "text-emerald-500 font-bold";
+
+                                            return (
+                                                <div key={i} className={`whitespace-pre-wrap flex gap-3 ${colorClass} w-full hover:bg-white/5 px-4 py-1 rounded-sm transition-colors border-l-2 border-transparent hover:border-amber-500/30`}>
+                                                    <span className="text-slate-700 select-none opacity-50 w-8 inline-block">{String(i).padStart(4, '0')}</span>
+                                                    <span className="flex-1">{line}</span>
+                                                </div>
+                                            );
+                                        })
+                                    )}
+                                    {/* Auto-scroll anchor */}
+                                    <div ref={(el) => { if (isConsoleExpanded) el?.scrollIntoView({ behavior: 'smooth' }); }}></div>
+                                </div>
                             </div>
                         </footer>
                     </main >
 
-                    {/* Progress Streaming Overlay */}
-                    {
-                        isRunning && (
-                            <div className="absolute inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-12 overflow-hidden">
-                                <div className="bg-[#0a0f1d] border border-white/10 rounded-2xl w-full max-w-4xl h-full flex flex-col shadow-2xl relative">
-                                    <div className="p-5 border-b border-white/5 flex items-center gap-4 bg-slate-900/50 shrink-0">
-                                        <div className="w-8 h-8 rounded-full border-2 border-amber-500/20 border-t-amber-500 animate-spin"></div>
-                                        <div>
-                                            <h3 className="text-sm font-black text-white uppercase tracking-widest">Executing AI Routine</h3>
-                                            <p className="text-[10px] text-amber-500 font-bold uppercase tracking-widest animate-pulse">Processing Data Stream...</p>
-                                        </div>
-                                    </div>
-                                    <div className="flex-1 p-6 bg-black/50 font-mono text-[10px] text-slate-400 overflow-y-auto scrollbar-thin flex flex-col items-start gap-1">
-                                        {progressLog.length === 0 ? (
-                                            <div className="text-slate-600 animate-pulse text-center w-full my-auto text-xs uppercase tracking-[0.2em] font-black">Initializing Backend Link...</div>
-                                        ) : (
-                                            progressLog.map((line, i) => {
-                                                const isError = line.toLowerCase().includes("error") || line.toLowerCase().includes("failed");
-                                                const isSuccess = line.includes("successfully");
-                                                let colorClass = "text-slate-400";
-                                                if (isError) colorClass = "text-rose-500 font-bold";
-                                                if (isSuccess) colorClass = "text-emerald-500 font-bold";
-
-                                                return (
-                                                    <div key={i} className={`whitespace-pre-wrap flex gap-3 ${colorClass} w-full hover:bg-white/5 px-2 py-1 rounded-sm transition-colors`}>
-                                                        <span className="text-slate-700 select-none opacity-50">{String(i).padStart(4, '0')}</span>
-                                                        <span>{line}</span>
-                                                    </div>
-                                                );
-                                            })
-                                        )}
-                                        {/* Auto-scroll anchor */}
-                                        <div ref={(el) => { el?.scrollIntoView(); }}></div>
-                                    </div>
-                                </div>
-                            </div>
-                        )
-                    }
-
                     {/* Lightbox Overlay */}
-                    {
-                        lightboxItem && (
-                            <div
-                                className="fixed inset-0 z-[60] bg-black/90 backdrop-blur-md flex items-center justify-center cursor-pointer"
-                                onClick={() => setLightboxItem(null)}
-                                style={{ animation: 'fadeIn 0.2s ease-out' }}
+                    {lightboxItem && (
+                        <div
+                            className="fixed inset-0 z-[60] bg-black/90 backdrop-blur-md flex items-center justify-center cursor-pointer"
+                            onClick={() => setLightboxItem(null)}
+                            style={{ animation: 'fadeIn 0.2s ease-out' }}
+                        >
+                            <img
+                                src={getImageUrl(lightboxItem)}
+                                className="max-w-[98vw] max-h-[95vh] object-contain rounded-lg shadow-2xl"
+                                style={{ animation: 'scaleIn 0.25s ease-out' }}
+                                onClick={(e) => e.stopPropagation()}
+                            />
+                            {/* Prev Arrow */}
+                            <button
+                                className="absolute left-4 top-1/2 -translate-y-1/2 w-12 h-12 bg-black/50 hover:bg-black/80 backdrop-blur-sm rounded-full flex items-center justify-center text-white/60 hover:text-white transition-all border border-white/10 hover:border-white/20"
+                                onClick={(e) => { e.stopPropagation(); lightboxNav('prev'); }}
                             >
-                                <img
-                                    src={getImageUrl(lightboxItem)}
-                                    className="max-w-[90vw] max-h-[85vh] object-contain rounded-2xl shadow-2xl"
-                                    style={{ animation: 'scaleIn 0.25s ease-out' }}
-                                    onClick={(e) => { e.stopPropagation(); setLightboxItem(null); }}
-                                />
-                                <div className="absolute bottom-8 left-1/2 -translate-x-1/2 bg-black/60 backdrop-blur-sm px-8 py-3 rounded-2xl border border-white/10 flex items-center gap-6">
-                                    <div className="flex flex-col">
-                                        <span className="text-[9px] font-bold uppercase text-slate-500 tracking-widest">File</span>
-                                        <span className="text-xs font-bold text-white">{lightboxItem.New_Filename || lightboxItem.Filename || "unknown"}</span>
-                                    </div>
-                                    <div className="w-px h-8 bg-white/10"></div>
-                                    <div className="flex flex-col">
-                                        <span className="text-[9px] font-bold uppercase text-slate-500 tracking-widest">Cluster</span>
-                                        <span className="text-xs font-bold text-amber-500">{lightboxItem.Cluster_ID || "none"}</span>
-                                    </div>
-                                    <div className="w-px h-8 bg-white/10"></div>
-                                    <div className="flex flex-col">
-                                        <span className="text-[9px] font-bold uppercase text-slate-500 tracking-widest">Reason</span>
-                                        <span className="text-xs font-bold text-slate-400 max-w-[300px] truncate">{lightboxItem.Reason || "—"}</span>
-                                    </div>
+                                <i data-lucide="chevron-left" className="w-6 h-6"></i>
+                            </button>
+                            {/* Next Arrow */}
+                            <button
+                                className="absolute right-4 top-1/2 -translate-y-1/2 w-12 h-12 bg-black/50 hover:bg-black/80 backdrop-blur-sm rounded-full flex items-center justify-center text-white/60 hover:text-white transition-all border border-white/10 hover:border-white/20"
+                                onClick={(e) => { e.stopPropagation(); lightboxNav('next'); }}
+                            >
+                                <i data-lucide="chevron-right" className="w-6 h-6"></i>
+                            </button>
+                            <div className="absolute bottom-8 left-1/2 -translate-x-1/2 bg-black/60 backdrop-blur-sm px-8 py-3 rounded-2xl border border-white/10 flex items-center gap-6">
+                                {selectedCluster && groups[selectedCluster] && (
+                                    <>
+                                        <div className="flex flex-col">
+                                            <span className="text-[9px] font-bold uppercase text-slate-500 tracking-widest">Position</span>
+                                            <span className="text-xs font-bold text-white font-mono">
+                                                {groups[selectedCluster].findIndex(item =>
+                                                    (item.Original_Path || item.Old_Path || item.Source_Path) ===
+                                                    (lightboxItem.Original_Path || lightboxItem.Old_Path || lightboxItem.Source_Path)
+                                                ) + 1} / {groups[selectedCluster].length}
+                                            </span>
+                                        </div>
+                                        <div className="w-px h-8 bg-white/10"></div>
+                                    </>
+                                )}
+                                <div className="flex flex-col">
+                                    <span className="text-[9px] font-bold uppercase text-slate-500 tracking-widest">File</span>
+                                    <span className="text-xs font-bold text-white">{lightboxItem.New_Filename || lightboxItem.Filename || "unknown"}</span>
                                 </div>
-                                <button
-                                    className="absolute top-6 right-6 text-white/40 hover:text-white transition-colors"
-                                    onClick={(e) => { e.stopPropagation(); setLightboxItem(null); }}
-                                >
-                                    <i data-lucide="x" className="w-6 h-6"></i>
-                                </button>
+                                <div className="w-px h-8 bg-white/10"></div>
+                                <div className="flex flex-col">
+                                    <span className="text-[9px] font-bold uppercase text-slate-500 tracking-widest">Cluster</span>
+                                    <span className="text-xs font-bold text-amber-500">{lightboxItem.Cluster_ID || "none"}</span>
+                                </div>
+                                <div className="w-px h-8 bg-white/10"></div>
+                                <div className="flex flex-col">
+                                    <span className="text-[9px] font-bold uppercase text-slate-500 tracking-widest">Reason</span>
+                                    <span className="text-xs font-bold text-slate-400 max-w-[300px] truncate">{lightboxItem.Reason || "—"}</span>
+                                </div>
                             </div>
-                        )
-                    }
+                            <button
+                                className="absolute top-6 right-6 text-white/40 hover:text-white transition-colors"
+                                onClick={(e) => { e.stopPropagation(); setLightboxItem(null); }}
+                            >
+                                <i data-lucide="x" className="w-6 h-6"></i>
+                            </button>
+                        </div>
+                    )}
 
                     {/* Diagnostic Result Modal */}
-                    {
-                        diagResult && (
-                            <div className="fixed inset-0 z-[70] bg-black/80 backdrop-blur-md flex items-center justify-center p-6">
-                                <div className="glass p-8 rounded-3xl w-full max-w-md border-amber-500/30 shadow-[0_0_50px_rgba(245,158,11,0.1)] relative" style={{ animation: 'scaleIn 0.3s ease-out' }}>
-                                    <div className="flex items-center gap-3 mb-6">
-                                        <div className="w-10 h-10 bg-amber-500 rounded-xl flex items-center justify-center shadow-lg shadow-amber-500/20">
-                                            <i data-lucide="microscope" className="text-white w-5 h-5"></i>
+                    {diagResult && (
+                        <div className="fixed inset-0 z-[70] bg-black/80 backdrop-blur-md flex items-center justify-center p-6">
+                            <div className="glass p-8 rounded-3xl w-full max-w-md border-amber-500/30 shadow-[0_0_50px_rgba(245,158,11,0.1)] relative" style={{ animation: 'scaleIn 0.3s ease-out' }}>
+                                <div className="flex items-center gap-3 mb-6">
+                                    <div className="w-10 h-10 bg-amber-500 rounded-xl flex items-center justify-center shadow-lg shadow-amber-500/20">
+                                        <i data-lucide="microscope" className="text-white w-5 h-5"></i>
+                                    </div>
+                                    <div>
+                                        <h3 className="text-sm font-black text-white uppercase tracking-widest">Diagnostic Report</h3>
+                                        <p className="text-[9px] text-slate-500 font-bold uppercase tracking-widest">Spread Analysis Complete</p>
+                                    </div>
+                                </div>
+
+                                <div className="space-y-4 mb-8">
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div className="bg-slate-900/50 p-4 rounded-2xl border border-white/5">
+                                            <span className="text-[9px] font-bold text-slate-500 uppercase block mb-1">Diameter (Max)</span>
+                                            <span className="text-xl font-mono font-black text-white">{diagResult.pairwise_stats.max}</span>
                                         </div>
-                                        <div>
-                                            <h3 className="text-sm font-black text-white uppercase tracking-widest">Diagnostic Report</h3>
-                                            <p className="text-[9px] text-slate-500 font-bold uppercase tracking-widest">Spread Analysis Complete</p>
+                                        <div className="bg-slate-900/50 p-4 rounded-2xl border border-white/5">
+                                            <span className="text-[9px] font-bold text-slate-500 uppercase block mb-1">Density (NN1)</span>
+                                            <span className="text-xl font-mono font-black text-white">{diagResult.density.avg_nn1}</span>
                                         </div>
                                     </div>
 
-                                    <div className="space-y-4 mb-8">
-                                        <div className="grid grid-cols-2 gap-4">
-                                            <div className="bg-slate-900/50 p-4 rounded-2xl border border-white/5">
-                                                <span className="text-[9px] font-bold text-slate-500 uppercase block mb-1">Diameter (Max)</span>
-                                                <span className="text-xl font-mono font-black text-white">{diagResult.pairwise_stats.max}</span>
+                                    <div className="bg-amber-500/5 border border-amber-500/20 p-5 rounded-2xl">
+                                        <div className="text-[10px] font-black text-amber-500 uppercase tracking-widest mb-4 flex items-center gap-2">
+                                            <i data-lucide="sparkles" className="w-3 h-3"></i>
+                                            AI Recommendations
+                                        </div>
+                                        <div className="space-y-3">
+                                            <div className="flex justify-between items-center">
+                                                <span className="text-xs font-bold text-slate-400">Suggested Epsilon</span>
+                                                <span className="text-sm font-mono font-black text-amber-400 bg-amber-400/10 px-2 py-1 rounded-lg">{diagResult.recommendations.suggested_epsilon}</span>
                                             </div>
-                                            <div className="bg-slate-900/50 p-4 rounded-2xl border border-white/5">
-                                                <span className="text-[9px] font-bold text-slate-500 uppercase block mb-1">Density (NN1)</span>
-                                                <span className="text-xl font-mono font-black text-white">{diagResult.density.avg_nn1}</span>
+                                            <div className="flex justify-between items-center">
+                                                <span className="text-xs font-bold text-slate-400">Min Samples</span>
+                                                <span className="text-sm font-mono font-black text-amber-400 bg-amber-400/10 px-2 py-1 rounded-lg">{diagResult.recommendations.suggested_min_samples}</span>
                                             </div>
                                         </div>
-
-                                        <div className="bg-amber-500/5 border border-amber-500/20 p-5 rounded-2xl">
-                                            <div className="text-[10px] font-black text-amber-500 uppercase tracking-widest mb-4 flex items-center gap-2">
-                                                <i data-lucide="sparkles" className="w-3 h-3"></i>
-                                                AI Recommendations
-                                            </div>
-                                            <div className="space-y-3">
-                                                <div className="flex justify-between items-center">
-                                                    <span className="text-xs font-bold text-slate-400">Suggested Epsilon</span>
-                                                    <span className="text-sm font-mono font-black text-amber-400 bg-amber-400/10 px-2 py-1 rounded-lg">{diagResult.recommendations.suggested_epsilon}</span>
-                                                </div>
-                                                <div className="flex justify-between items-center">
-                                                    <span className="text-xs font-bold text-slate-400">Min Samples</span>
-                                                    <span className="text-sm font-mono font-black text-amber-400 bg-amber-400/10 px-2 py-1 rounded-lg">{diagResult.recommendations.suggested_min_samples}</span>
-                                                </div>
-                                            </div>
-                                            <p className="mt-4 text-[10px] text-slate-500 italic leading-relaxed">
-                                                {diagResult.recommendations.notes}
-                                            </p>
-                                        </div>
+                                        <p className="mt-4 text-[10px] text-slate-500 italic leading-relaxed">
+                                            {diagResult.recommendations.notes}
+                                        </p>
                                     </div>
+                                </div>
 
-                                    <div className="flex gap-3">
-                                        <button
-                                            onClick={applyDiagSettings}
-                                            className="flex-1 py-4 bg-amber-500 hover:bg-amber-400 text-white font-black text-xs uppercase tracking-widest rounded-2xl transition-all shadow-lg shadow-amber-500/20"
-                                        >
-                                            Apply Settings
-                                        </button>
-                                        <button
-                                            onClick={() => setDiagResult(null)}
-                                            className="px-6 py-4 bg-slate-800 hover:bg-slate-700 text-slate-400 font-black text-xs uppercase tracking-widest rounded-2xl transition-all"
-                                        >
-                                            Dismiss
-                                        </button>
-                                    </div>
-
+                                <div className="flex gap-3">
+                                    <button
+                                        onClick={applyDiagSettings}
+                                        className="flex-1 py-4 bg-amber-500 hover:bg-amber-400 text-white font-black text-xs uppercase tracking-widest rounded-2xl transition-all shadow-lg shadow-amber-500/20"
+                                    >
+                                        Apply Settings
+                                    </button>
                                     <button
                                         onClick={() => setDiagResult(null)}
-                                        className="absolute top-6 right-6 text-white/20 hover:text-white transition-colors"
+                                        className="px-6 py-4 bg-slate-800 hover:bg-slate-700 text-slate-400 font-black text-xs uppercase tracking-widest rounded-2xl transition-all"
                                     >
-                                        <i data-lucide="x" className="w-5 h-5"></i>
+                                        Dismiss
                                     </button>
                                 </div>
-                            </div>
-                        )
-                    }
 
-                </div >
+                                <button
+                                    onClick={() => setDiagResult(null)}
+                                    className="absolute top-6 right-6 text-white/20 hover:text-white transition-colors"
+                                >
+                                    <i data-lucide="x" className="w-5 h-5"></i>
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                </div>
             );
         }
 

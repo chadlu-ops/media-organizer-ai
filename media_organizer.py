@@ -82,6 +82,14 @@ PARAM_SCHEMA = [
         "is_plugin": True, "plugin_icon": "video",
     },
     {
+        "key": "enable_video_deduplication", "cli": "--enable-video-deduplication", "type": "bool",
+        "default": True,
+        "label": "Video De-duplication",
+        "tooltip": "Phase 1: Identifies exact binary duplicates of videos and moves them to 'Duplicates' folder",
+        "group": "core",
+        "is_plugin": True, "plugin_icon": "copy",
+    },
+    {
         "key": "enable_deduplication", "cli": "--enable-deduplication", "type": "bool",
         "default": True,
         "label": "Image De-duplication",
@@ -297,11 +305,11 @@ def detect_video_orientation(filepath: Path) -> str:
         data = json.loads(result.stdout)
     except Exception as exc:
         log.warning("ffprobe failed for %s: %s — defaulting to landscape", filepath, exc)
-        return "landscape"
+        return "landscape", 0, 0
 
     streams = data.get("streams", [])
     if not streams:
-        return "landscape"
+        return "landscape", 0, 0
 
     stream = streams[0]
     width = int(stream.get("width", 0))
@@ -328,22 +336,37 @@ def detect_video_orientation(filepath: Path) -> str:
 
 
 def phase1_video_sorting(
-    root: Path, dry_run: bool, action: str = "copy"
+    root: Path, dry_run: bool, action: str = "copy", enable_deduplication: bool = True
 ) -> tuple[list[dict], list[Path]]:
     """
     Move video files into videos/horizontal/ or videos/vertical/.
+    Also performs exact binary de-duplication if enabled.
     Returns (log_entries, remaining_files_that_are_not_videos).
     """
     log.info("=" * 60)
-    log.info("PHASE 1 — Video Sorting")
+    log.info("PHASE 1 — Video Sorting & De-duplication")
     log.info("=" * 60)
 
     entries: list[dict] = []
     non_video_files: list[Path] = []
+    seen_hashes: dict[str, Path] = {}
 
     org_root = root / ORGANIZED_DIR_NAME
     dest_h = org_root / "videos" / "horizontal"
     dest_v = org_root / "videos" / "vertical"
+    dup_dir = org_root / "duplicates"
+
+    # 1. Pre-populate hashes from already organized videos to detect duplicates against them
+    if enable_deduplication and (org_root / "videos").exists():
+        log.info("Indexing existing organized videos for de-duplication...")
+        for p in (org_root / "videos").rglob("*"):
+            if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS:
+                try:
+                    h = md5_hash(p)
+                    if h not in seen_hashes:
+                        seen_hashes[h] = p
+                except Exception:
+                    pass
 
     for path in sorted(root.rglob("*")):
         if not path.is_file():
@@ -359,6 +382,31 @@ def phase1_video_sorting(
 
         ext = path.suffix.lower()
         if ext in VIDEO_EXTENSIONS:
+            # --- Check for duplicates if enabled ---
+            if enable_deduplication:
+                h = md5_hash(path)
+                if h in seen_hashes:
+                    dest = dup_dir / path.name
+                    if dest.exists() or any(e["New_Filename"] == dest.name for e in entries):
+                        stem = dest.stem
+                        suffix = dest.suffix
+                        dest = dup_dir / f"{stem}_{short_path_hash(path)}{suffix}"
+                    
+                    safe_action(path, dest, dry_run, action=action)
+                    entries.append({
+                        "Original_Path": str(path),
+                        "New_Path": str(dest) if not dry_run else f"[DRY RUN] {dest}",
+                        "New_Filename": dest.name,
+                        "Hash": h,
+                        "Cluster_ID": "duplicate",
+                        "Media_Type": "video",
+                        "Reason": f"Duplicate Video: Exact MD5 match ({h[:8]})",
+                        "Confidence": "1.0 (Bit-for-bit)",
+                    })
+                    continue
+                else:
+                    seen_hashes[h] = path
+
             orientation, w, h = detect_video_orientation(path)
             if orientation == "portrait":
                 dest = dest_v / path.name
@@ -1422,7 +1470,9 @@ def main() -> None:
     video_entries = []
     remaining_files = []
     if _arg("enable_video_sorting"):
-        video_entries, remaining_files = phase1_video_sorting(root, _arg("dry_run"), action=_arg("action"))
+        video_entries, remaining_files = phase1_video_sorting(
+            root, _arg("dry_run"), action=_arg("action"), enable_deduplication=_arg("enable_video_deduplication")
+        )
         all_entries.extend(video_entries)
     else:
         log.info("[SKIP] Phase 1: Video Sorting disabled.")
