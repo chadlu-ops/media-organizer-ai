@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cluster Cloud Explorer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap');
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #050914;
+            color: #f8fafc;
+            overflow: hidden;
+            margin: 0;
+            padding: 0;
+        }
+
+        #viz svg {
+            display: block;
+            overflow: visible;
+        }
+
+        .glass {
+            background: rgba(15, 23, 42, 0.8);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .node-img {
+            border-radius: 50%;
+            border: 2px solid rgba(245, 158, 11, 0.3);
+            transition: all 0.3s;
+            cursor: pointer;
+        }
+
+        .node-img:hover {
+            border-color: #f59e0b;
+            transform: scale(1.2);
+            z-index: 100;
+        }
+
+        .link {
+            stroke: rgba(255, 255, 255, 0.05);
+            stroke-opacity: 0.6;
+        }
+
+        .label {
+            font-size: 10px;
+            font-weight: 800;
+            fill: #64748b;
+            pointer-events: none;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+        }
+
+        canvas {
+            cursor: grab;
+        }
+
+        canvas:active {
+            cursor: grabbing;
+        }
+    </style>
+</head>
+
+<body class="h-screen w-screen flex flex-col">
+
+    <!-- Header -->
+    <header class="glass h-16 flex items-center justify-between px-8 z-50">
+        <div class="flex items-center gap-4">
+            <div class="w-8 h-8 bg-amber-500 rounded-lg flex items-center justify-center">
+                <i data-lucide="cloud" class="text-white w-5 h-5"></i>
+            </div>
+            <h1 class="font-black tracking-tighter text-xl uppercase italic">Cloud Explorer</h1>
+        </div>
+
+        <div class="flex items-center gap-6">
+            <div id="status" class="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Initialising...
+            </div>
+            <button onclick="window.close()" class="text-slate-500 hover:text-white transition-colors">
+                <i data-lucide="x" class="w-5 h-5"></i>
+            </button>
+        </div>
+    </header>
+
+    <main class="flex-1 relative">
+        <div id="viz" class="w-full h-full"></div>
+
+        <!-- Controls Overlay -->
+        <div class="absolute bottom-8 left-8 glass p-6 rounded-3xl w-80 space-y-6">
+            <div>
+                <label class="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-2">Central
+                    Anchor</label>
+                <select id="anchor-select"
+                    class="w-full bg-slate-900 border border-white/5 rounded-xl px-4 py-3 text-xs focus:outline-none focus:border-amber-500/50">
+                    <option value="">Select Cluster...</option>
+                </select>
+            </div>
+
+            <div class="space-y-4">
+                <div class="flex justify-between items-center">
+                    <span class="text-[10px] font-bold text-slate-400 uppercase">Cloud Density</span>
+                    <input type="range" id="density" min="50" max="500" value="200" class="accent-amber-500">
+                </div>
+                <div class="flex justify-between items-center">
+                    <span class="text-[10px] font-bold text-slate-400 uppercase">Gravitational Pull</span>
+                    <input type="range" id="strength" min="-100" max="0" value="-30" class="accent-amber-500">
+                </div>
+            </div>
+
+            <button onclick="resetView()"
+                class="w-full py-3 bg-white/5 hover:bg-white/10 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all">
+                Recalibrate View
+            </button>
+        </div>
+
+        <!-- Detail Overlay -->
+        <div id="detail"
+            class="absolute top-8 right-8 glass p-6 rounded-3xl w-64 hidden transform transition-all translate-x-10 opacity-0 bg-slate-950/90">
+            <div class="aspect-square bg-slate-900 rounded-2xl overflow-hidden mb-4 border border-white/5">
+                <img id="detail-img" src="" class="w-full h-full object-cover">
+            </div>
+            <h3 id="detail-name" class="text-xs font-black truncate text-white mb-2">Filename.jpg</h3>
+            <div class="space-y-2">
+                <div class="flex justify-between text-[9px]">
+                    <span class="text-slate-500 uppercase font-black">Group ID</span>
+                    <span id="detail-group" class="text-amber-500 font-mono">group_001</span>
+                </div>
+                <div class="flex justify-between text-[9px]">
+                    <span class="text-slate-500 uppercase font-black">AI Confidence</span>
+                    <span id="detail-conf" class="text-emerald-500 font-mono">0.992</span>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        let rawData = [];
+        let simulation;
+        let svg;
+        let g;
+        let serverUrl = "http://localhost:8000";
+        let width, height;
+
+        async function init() {
+            lucide.createIcons();
+
+            // Try to load latest log from parent or server
+            try {
+                const res = await fetch(`${serverUrl}/api/latest_log`);
+                const logInfo = await res.json();
+                const csvRes = await fetch(`${serverUrl}/logs/${logInfo.filename}`);
+                const csvText = await csvRes.text();
+
+                Papa.parse(csvText, {
+                    header: true,
+                    skipEmptyLines: true,
+                    complete: (results) => {
+                        rawData = results.data;
+                        document.getElementById('status').innerText = `${rawData.length} Objects Loaded`;
+                        setupAnchors();
+                        startViz();
+                    }
+                });
+            } catch (e) {
+                document.getElementById('status').innerText = "Load Failed";
+                console.error(e);
+            }
+        }
+
+        function setupAnchors() {
+            const select = document.getElementById('anchor-select');
+            const groups = [...new Set(rawData.map(d => d.Cluster_ID))].sort();
+            groups.forEach(g => {
+                if (!g) return;
+                const opt = document.createElement('option');
+                opt.value = g;
+                opt.innerText = g.toUpperCase().replace('_', ' ');
+                select.appendChild(opt);
+            });
+
+            select.onchange = (e) => updateCloud(e.target.value);
+        }
+
+        function startViz() {
+            // Compute dimensions from the actual container after layout is complete
+            const vizEl = document.getElementById('viz');
+            width = vizEl.clientWidth || window.innerWidth;
+            height = vizEl.clientHeight || (window.innerHeight - 64);
+            console.log(`[Cloud Explorer] SVG dimensions: ${width}x${height}`);
+
+            svg = d3.select("#viz").append("svg")
+                .attr("width", width)
+                .attr("height", height)
+                .call(d3.zoom().on("zoom", (e) => g.attr("transform", e.transform)));
+
+            g = svg.append("g");
+            updateCloud();
+        }
+
+        function updateCloud(targetGroupId = "") {
+            g.selectAll("*").remove();
+            if (simulation) simulation.stop();
+
+            const nodes = [];
+            const links = [];
+
+            // Filter logic: 
+            // 1. Members of the target group
+            // 2. Outliers whose Near_Misses includes the target group
+
+            rawData.forEach((d, i) => {
+                let isMember = d.Cluster_ID === targetGroupId;
+                let nearMissWeight = 0;
+
+                try {
+                    const nm = JSON.parse(d.Near_Misses || "{}");
+                    if (nm[targetGroupId]) {
+                        nearMissWeight = 1 - nm[targetGroupId]; // Inverse distance for strength
+                    }
+                } catch (e) { }
+
+                if (isMember || nearMissWeight > 0.1) {
+                    nodes.push({
+                        id: d.Original_Path,
+                        filename: d.New_Filename,
+                        group: d.Cluster_ID,
+                        isMember: isMember,
+                        weight: isMember ? 1 : nearMissWeight,
+                        data: d
+                    });
+                }
+            });
+
+            console.log(`[Cloud Explorer] Target: '${targetGroupId}', Matched nodes: ${nodes.length}`);
+
+            if (nodes.length === 0 && targetGroupId) {
+                // If no direct near misses found, just show the group members
+                rawData.filter(d => d.Cluster_ID === targetGroupId).forEach(d => {
+                    nodes.push({ id: d.Original_Path, filename: d.New_Filename, group: d.Cluster_ID, isMember: true, weight: 1, data: d });
+                });
+            }
+
+            // Central Anchor Point
+            console.log(`[Cloud Explorer] Total nodes (incl. near-misses): ${nodes.length}, width=${width}, height=${height}`);
+            nodes.push({ id: "anchor", fx: width / 2, fy: height / 2, isAnchor: true });
+
+            nodes.forEach(n => {
+                if (n.id !== "anchor") {
+                    links.push({ source: "anchor", target: n.id, value: n.weight });
+                }
+            });
+
+            simulation = d3.forceSimulation(nodes)
+                .force("link", d3.forceLink(links).id(d => d.id).distance(d => (1 - d.value) * 600 + 50))
+                .force("charge", d3.forceManyBody().strength(d => d.isAnchor ? -500 : -100))
+                .force("center", d3.forceCenter(width / 2, height / 2))
+                .force("collision", d3.forceCollide().radius(30));
+
+            const link = g.append("g")
+                .attr("class", "links")
+                .selectAll("line")
+                .data(links)
+                .enter().append("line")
+                .attr("class", "link")
+                .attr("stroke-width", d => d.value * 2);
+
+            const node = g.append("g")
+                .attr("class", "nodes")
+                .selectAll("g")
+                .data(nodes.filter(d => !d.isAnchor))
+                .enter().append("g")
+                .on("mouseover", showDetail)
+                .on("mouseout", hideDetail);
+
+            node.append("circle")
+                .attr("r", d => d.isMember ? 24 : 16)
+                .attr("fill", "#1e293b")
+                .attr("stroke", d => d.isMember ? "#f59e0b" : "#475569")
+                .attr("stroke-width", 2);
+
+            node.append("clipPath")
+                .attr("id", (d, i) => `clip-${i}`)
+                .append("circle")
+                .attr("r", d => d.isMember ? 23 : 15);
+
+            node.append("image")
+                .attr("xlink:href", d => getImageUrl(d.data))
+                .attr("x", d => d.isMember ? -24 : -16)
+                .attr("y", d => d.isMember ? -24 : -16)
+                .attr("width", d => d.isMember ? 48 : 32)
+                .attr("height", d => d.isMember ? 48 : 32)
+                .attr("clip-path", (d, i) => `url(#clip-${i})`)
+                .attr("class", "node-img");
+
+            simulation.on("tick", () => {
+                link
+                    .attr("x1", d => d.source.x)
+                    .attr("y1", d => d.source.y)
+                    .attr("x2", d => d.target.x)
+                    .attr("y2", d => d.target.y);
+
+                node.attr("transform", d => `translate(${d.x},${d.y})`);
+            });
+        }
+
+        function getImageUrl(item) {
+            if (!item) return "";
+            const origPath = item.Original_Path || item.Old_Path;
+            if (origPath) {
+                return `${serverUrl}/_abs/${encodeURIComponent(origPath.replace(/\\/g, "/"))}`;
+            }
+            return "";
+        }
+
+        function showDetail(event, d) {
+            const detail = document.getElementById('detail');
+            document.getElementById('detail-img').src = getImageUrl(d.data);
+            document.getElementById('detail-name').innerText = d.filename;
+            document.getElementById('detail-group').innerText = d.group;
+            document.getElementById('detail-conf').innerText = d.data.Confidence;
+
+            detail.classList.remove('hidden');
+            setTimeout(() => {
+                detail.style.opacity = '1';
+                detail.style.transform = 'translateX(0)';
+            }, 10);
+        }
+
+        function hideDetail() {
+            const detail = document.getElementById('detail');
+            detail.style.opacity = '0';
+            detail.style.transform = 'translateX(10px)';
+            setTimeout(() => detail.classList.add('hidden'), 300);
+        }
+
+        function resetView() {
+            svg.transition().duration(750).call(
+                d3.zoom().transform,
+                d3.zoomIdentity
+            );
+        }
+
+        window.onload = init;
+    </script>
+</body>
+
+</html>

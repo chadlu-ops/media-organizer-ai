@@ -1,0 +1,1173 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Media Organizer Visualizer</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- PapaParse for CSV -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
+    <!-- React & ReactDOM -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0f172a;
+            color: #f8fafc;
+        }
+
+        .glass {
+            background: rgba(30, 41, 59, 0.7);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .amber-glow {
+            box-shadow: 0 0 20px rgba(245, 158, 11, 0.2);
+        }
+
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #1e293b;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #475569;
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #64748b;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+            }
+
+            to {
+                opacity: 1;
+            }
+        }
+
+        @keyframes scaleIn {
+            from {
+                opacity: 0;
+                transform: scale(0.9);
+            }
+
+            to {
+                opacity: 1;
+                transform: scale(1);
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useCallback } = React;
+
+        const MediaCard = ({ item, getImageUrl, onImageClick }) => {
+            const [hasError, setHasError] = useState(false);
+            const [retryCount, setRetryCount] = useState(0);
+            const imageUrl = getImageUrl(item);
+            const isVideo = item.Media_Type === "video" || (item.New_Path && item.New_Path.toLowerCase().includes("video/"));
+            const maxRetries = 3;
+
+            const openExplorer = (e) => {
+                e.stopPropagation();
+                window.open(`explorer.html?anchor=${item.Cluster_ID}`, '_blank');
+            };
+
+            const handleError = () => {
+                if (retryCount < maxRetries) {
+                    setTimeout(() => {
+                        setRetryCount(prev => prev + 1);
+                        setHasError(false);
+                    }, 1000 * (retryCount + 1)); // Exponential backoff-ish
+                } else {
+                    setHasError(true);
+                }
+            };
+
+            return (
+                <div className="group flex flex-col gap-4">
+                    <div className="aspect-[4/5] bg-slate-900 rounded-3xl overflow-hidden border border-white/5 shadow-2xl relative group-hover:border-amber-500/30 transition-all duration-500">
+                        {item.Media_Type === "image" && !isVideo ? (
+                            <>
+                                {!hasError ? (
+                                    <img
+                                        key={`${imageUrl}-${retryCount}`}
+                                        src={retryCount > 0 ? `${imageUrl}?r=${retryCount}` : imageUrl}
+                                        className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700 cursor-pointer"
+                                        loading="lazy"
+                                        onError={handleError}
+                                        onClick={(e) => { e.stopPropagation(); onImageClick && onImageClick(item); }}
+                                    />
+                                ) : (
+                                    <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center bg-slate-900">
+                                        <i data-lucide="alert-octagon" className="w-8 h-8 text-slate-700 mb-2"></i>
+                                        <span className="text-[9px] font-bold text-slate-600 leading-tight">MEDIA_LINK_ERROR</span>
+                                    </div>
+                                )}
+                            </>
+                        ) : (
+                            <div className="w-full h-full flex flex-col items-center justify-center gap-3 bg-slate-900">
+                                <div className="w-16 h-16 rounded-full bg-amber-500/10 flex items-center justify-center text-amber-500 shadow-inner">
+                                    <i data-lucide="video" className="w-8 h-8"></i>
+                                </div>
+                                <span className="text-[10px] font-black uppercase tracking-widest text-slate-600">Video Media</span>
+                            </div>
+                        )}
+
+                        {/* Overlay Stats */}
+                        <div className="absolute inset-x-0 bottom-0 p-4 bg-gradient-to-t from-black/80 to-transparent opacity-0 group-hover:opacity-100 transition-opacity">
+                            <div className="flex justify-between items-center text-[9px] font-bold uppercase text-white/60">
+                                <span>CRC32 Check</span>
+                                <span className="text-amber-500 font-mono">{item.Hash ? item.Hash.substring(0, 8) : 'NONE'}</span>
+                            </div>
+                            <button
+                                onClick={openExplorer}
+                                className="mt-2 w-full py-2 bg-amber-500 text-black rounded-xl text-[8px] font-black uppercase tracking-widest hover:bg-white transition-colors flex items-center justify-center gap-1"
+                            >
+                                <i data-lucide="cloud" className="w-3 h-3"></i>
+                                Explore Cloud
+                            </button>
+                        </div>
+                    </div>
+                    <div className="px-2">
+                        <h4 className="text-[11px] font-black text-slate-400 truncate mb-1">{item.New_Filename || item.Filename || "unnamed_source"}</h4>
+                        <p className="text-[9px] font-bold text-slate-600 leading-tight line-clamp-2 italic">{item.Reason || "No diagnostic info available"}</p>
+                    </div>
+                </div>
+            );
+        };
+
+        function App() {
+            const [data, setData] = useState([]);
+            const [organizedPath, setOrganizedPath] = useState(localStorage.getItem("organizedRoot") || "");
+            const [backendRoot, setBackendRoot] = useState("");
+            const [isRootSyncing, setIsRootSyncing] = useState(false);
+            const [isVirtualMode, setIsVirtualMode] = useState(false);
+            const [manualVirtualMode, setManualVirtualMode] = useState(false);
+            const [selectedCluster, setSelectedCluster] = useState(null);
+            const [gridSize, setGridSize] = useState(4);
+            const [serverUrl, setServerUrl] = useState("http://localhost:8000");
+            const [serverStatus, setServerStatus] = useState("unknown");
+            const [settings, setSettings] = useState(null);
+            const [isRunning, setIsRunning] = useState(false);
+            const [progressLog, setProgressLog] = useState([]);
+            const [lightboxItem, setLightboxItem] = useState(null);
+            const [showPathPrompt, setShowPathPrompt] = useState(false);
+            const [pendingRealRun, setPendingRealRun] = useState(false);
+            const [showDiagPathPrompt, setShowDiagPathPrompt] = useState(false);
+            const [diagPath, setDiagPath] = useState("");
+            const [diagResult, setDiagResult] = useState(null);
+            const [isDiagnosing, setIsDiagnosing] = useState(false);
+
+            // Close lightbox on Escape key
+            useEffect(() => {
+                const handleKey = (e) => { if (e.key === 'Escape') setLightboxItem(null); };
+                window.addEventListener('keydown', handleKey);
+                return () => window.removeEventListener('keydown', handleKey);
+            }, []);
+
+            // AI Tuning Parameters — initialized from schema
+            const [paramSchema, setParamSchema] = useState([]);
+            const [aiParams, setAiParams] = useState({});
+            const [enabledPlugins, setEnabledPlugins] = useState({});
+
+            // Heartbeat check for server health
+            useEffect(() => {
+                const checkServer = async () => {
+                    try {
+                        const res = await fetch(`${serverUrl}/api/status`);
+                        if (res.ok) {
+                            const data = await res.json();
+                            setServerStatus("connected");
+                            setBackendRoot(data.root || "");
+                        } else {
+                            setServerStatus("error");
+                        }
+                    } catch (e) {
+                        setServerStatus("error");
+                    }
+                };
+                checkServer();
+                const interval = setInterval(checkServer, 10000);
+                return () => clearInterval(interval);
+            }, [serverUrl]);
+
+            // Sync root path with backend on load if found in localStorage
+            useEffect(() => {
+                if (organizedPath) updateBackendRoot(organizedPath);
+            }, []);
+
+            // Fetch param schema from backend and initialize defaults
+            useEffect(() => {
+                fetch(`${serverUrl}/api/schema?t=${Date.now()}`)
+                    .then(r => r.json())
+                    .then(schema => {
+                        setParamSchema(schema);
+                        const defaults = {};
+                        const pluginDefaults = {};
+                        schema.forEach(p => {
+                            defaults[p.key] = p.default;
+                            if (p.is_plugin) {
+                                // Plugins with non-zero/non-false defaults are enabled
+                                pluginDefaults[p.key] = p.type === 'bool' ? true : (p.default > 0);
+                            }
+                        });
+                        setAiParams(prev => ({ ...defaults, ...prev }));
+                        setEnabledPlugins(prev => ({ ...pluginDefaults, ...prev }));
+                    })
+                    .catch(err => console.warn('Schema fetch failed, using defaults:', err));
+            }, [serverUrl]);
+
+            // Toggle a plugin on/off
+            const togglePlugin = (key) => {
+                setEnabledPlugins(prev => ({ ...prev, [key]: !prev[key] }));
+            };
+
+            // Generic control renderer based on schema entry
+            const renderParamControl = (p) => {
+                const val = aiParams[p.key];
+                const update = (v) => setAiParams(prev => ({ ...prev, [p.key]: v }));
+
+                if (p.type === 'bool' && !p.is_plugin) {
+                    return (
+                        <label key={p.key} className="flex items-center gap-2 cursor-pointer group/ctrl relative">
+                            <input type="checkbox" checked={!!val} onChange={(e) => update(e.target.checked)}
+                                className="w-3.5 h-3.5 accent-amber-500 rounded cursor-pointer" />
+                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{p.label}</span>
+                            <i data-lucide="info" className="w-3 h-3 opacity-30 group-hover/ctrl:opacity-100 transition-opacity"></i>
+                            <div className="absolute left-0 bottom-full mb-2 w-52 p-2 bg-slate-800 text-slate-300 text-[9px] rounded-lg shadow-xl opacity-0 invisible group-hover/ctrl:opacity-100 group-hover/ctrl:visible transition-all z-50 pointer-events-none">
+                                {p.tooltip}
+                            </div>
+                        </label>
+                    );
+                }
+                if (p.type === 'choice') {
+                    return (
+                        <div key={p.key} className="space-y-2">
+                            <div className="flex justify-between text-[11px] font-medium items-center group relative mb-1">
+                                <div className="flex items-center gap-1.5 cursor-help">
+                                    <span>{p.label}</span>
+                                    <i data-lucide="info" className="w-3 h-3 opacity-30 group-hover:opacity-100 transition-opacity"></i>
+                                    <div className="absolute left-0 bottom-full mb-2 w-48 p-2 bg-slate-800 text-slate-300 text-[9px] rounded-lg shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 pointer-events-none">
+                                        {p.tooltip}
+                                    </div>
+                                </div>
+                                <span className="text-amber-400 uppercase text-[9px]">{val}</span>
+                            </div>
+                            <div className="flex bg-slate-800 p-1 rounded-lg">
+                                {p.choices.map(c => (
+                                    <button key={c} onClick={() => update(c)}
+                                        className={`flex-1 py-1 text-[10px] font-bold rounded ${val === c ? 'bg-slate-700 text-white shadow-sm' : 'text-slate-500 hover:text-slate-400'}`}
+                                    >{c.toUpperCase()}</button>
+                                ))}
+                            </div>
+                        </div>
+                    );
+                }
+                // int or float — range slider
+                const step = p.step || (p.type === 'int' ? 1 : 0.05);
+                const min = p.min ?? 0;
+                const max = p.max ?? 1;
+                const parse = p.type === 'int' ? parseInt : parseFloat;
+                const display = p.type === 'float' ? (val ?? 0).toFixed(String(step).split('.')[1]?.length || 2) : val;
+                return (
+                    <div key={p.key} className="space-y-2">
+                        <div className="flex justify-between text-[11px] font-medium items-center group relative">
+                            <div className="flex items-center gap-1.5 cursor-help">
+                                <span>{p.label}</span>
+                                <i data-lucide="info" className="w-3 h-3 opacity-30 group-hover:opacity-100 transition-opacity"></i>
+                                <div className="absolute left-0 bottom-full mb-2 w-48 p-2 bg-slate-800 text-slate-300 text-[9px] rounded-lg shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 pointer-events-none">
+                                    {p.tooltip}
+                                </div>
+                            </div>
+                            <span className="text-amber-400 font-mono">{display}</span>
+                        </div>
+                        <input type="range" min={min} max={max} step={step} value={val ?? p.default}
+                            onChange={(e) => update(parse(e.target.value))}
+                            className="w-full accent-amber-500 h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer" />
+                    </div>
+                );
+            };
+
+            // Render a plugin card with toggle
+            const renderPluginCard = (p) => {
+                const isAiClusteringOff = p.group === 'weights' && enabledPlugins['enable_ai_clustering'] === false;
+                const isEnabled = (enabledPlugins[p.key] !== false) && !isAiClusteringOff;
+                const val = aiParams[p.key];
+                const update = (v) => setAiParams(prev => ({ ...prev, [p.key]: v }));
+                const icon = p.plugin_icon || 'puzzle';
+
+                return (
+                    <div key={p.key} className={`bg-slate-900/40 rounded-xl border transition-all duration-300 ${isEnabled ? 'border-amber-500/20 shadow-[0_0_15px_rgba(245,158,11,0.03)]' : 'border-white/5 opacity-50'} ${isAiClusteringOff ? 'grayscale-[0.5]' : ''}`}>
+                        <div className="flex items-center justify-between px-3 py-2.5 cursor-pointer" onClick={() => !isAiClusteringOff && togglePlugin(p.key)}>
+                            <div className="flex items-center gap-2">
+                                <div className={`w-6 h-6 rounded-lg flex items-center justify-center transition-colors ${isEnabled ? 'bg-amber-500/20 text-amber-400' : 'bg-slate-800 text-slate-600'}`}>
+                                    <i data-lucide={icon} className="w-3 h-3"></i>
+                                </div>
+                                <div className="max-w-[140px]">
+                                    <div className="text-[10px] font-bold text-slate-300 uppercase tracking-wider truncate">{p.label}</div>
+                                    <div className="text-[8px] text-slate-600 truncate">{isAiClusteringOff ? "Requires AI Engine to be active" : p.tooltip}</div>
+                                </div>
+                            </div>
+                            <button
+                                disabled={isAiClusteringOff}
+                                className={`w-8 h-4 rounded-full transition-colors relative flex-shrink-0 ${isEnabled ? 'bg-amber-500' : 'bg-slate-700'} ${isAiClusteringOff ? 'opacity-30' : ''}`}
+                            >
+                                <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${isEnabled ? 'left-4' : 'left-0.5'}`}></div>
+                            </button>
+                        </div>
+                        {isEnabled && (
+                            <div className="px-3 pb-3 pt-0">
+                                {p.type === 'bool' ? (
+                                    <div className="text-[9px] text-amber-400/80 font-bold uppercase tracking-widest text-center py-1">Active</div>
+                                ) : (() => {
+                                    const step = p.step || 0.05;
+                                    const min = p.min ?? 0;
+                                    const max = p.max ?? 1;
+                                    const parse = p.type === 'int' ? parseInt : parseFloat;
+                                    const display = p.type === 'float' ? (val ?? 0).toFixed(String(step).split('.')[1]?.length || 2) : val;
+                                    return (
+                                        <div className="space-y-1">
+                                            <div className="flex justify-between text-[9px]">
+                                                <span className="text-slate-600 font-mono">{min}</span>
+                                                <span className="text-amber-400 font-mono font-bold">{display}</span>
+                                                <span className="text-slate-600 font-mono">{max}</span>
+                                            </div>
+                                            <input type="range" min={min} max={max} step={step} value={val ?? p.default}
+                                                onChange={(e) => update(parse(e.target.value))}
+                                                className="w-full accent-amber-500 h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer" />
+                                        </div>
+                                    );
+                                })()}
+                            </div>
+                        )}
+                    </div>
+                );
+            };
+
+            // Group schema entries by their group field
+            const schemaGroups = useMemo(() => {
+                const groups = {};
+                paramSchema.forEach(p => {
+                    const g = p.group || 'other';
+                    if (!groups[g]) groups[g] = [];
+                    groups[g].push(p);
+                });
+                return groups;
+            }, [paramSchema]);
+
+            const updateBackendRoot = async (path) => {
+                if (!path) return;
+                setIsRootSyncing(true);
+                try {
+                    const res = await fetch(`${serverUrl}/api/set_root`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ path: path.replace(/\\/g, "/") })
+                    });
+                    const result = await res.json();
+                    if (res.ok) {
+                        localStorage.setItem("organizedRoot", path);
+                        setBackendRoot(result.new_root || path);
+                    } else {
+                        alert("Error setting root: " + (result.error || "Unknown error"));
+                    }
+                } catch (e) {
+                    console.error("Failed to update root", e);
+                } finally {
+                    setIsRootSyncing(false);
+                }
+            };
+
+            const loadLatestLog = async () => {
+                try {
+                    const res = await fetch(`${serverUrl}/api/latest_log`);
+                    if (!res.ok) return;
+                    const logInfo = await res.json();
+
+                    // Fetch the actual CSV content
+                    const csvRes = await fetch(`${serverUrl}/logs/${logInfo.filename}`);
+                    if (!csvRes.ok) return;
+                    const csvText = await csvRes.text();
+
+                    Papa.parse(csvText, {
+                        header: true,
+                        skipEmptyLines: true,
+                        complete: (results) => {
+                            setData(results.data);
+                            processLogMetadata(results.data);
+                        }
+                    });
+                } catch (e) {
+                    console.error("Failed to load latest log", e);
+                }
+            };
+
+            const processLogMetadata = (csvData) => {
+                if (csvData.length > 0) {
+                    // Virtual Mode Detection
+                    const isDry = csvData.some(row => {
+                        const newPath = row.New_Path || row.Destination_Path || "";
+                        const reason = row.Reason || "";
+                        const sets = row.Settings || "{}";
+                        let isDryInSettings = false;
+                        try { isDryInSettings = JSON.parse(sets).dry_run === true; } catch (e) { }
+                        return (newPath && newPath.includes("[DRY RUN]")) ||
+                            (reason.toLowerCase().includes("dry run")) ||
+                            isDryInSettings;
+                    });
+                    setIsVirtualMode(isDry);
+
+                    // Extract Settings
+                    if (csvData[0].Settings) {
+                        try {
+                            const parsed = JSON.parse(csvData[0].Settings);
+                            if (Object.keys(parsed).length > 0) {
+                                setSettings(parsed);
+                                // Sync tuning params dynamically from the log
+                                setAiParams(prev => {
+                                    const next = { ...prev };
+                                    Object.entries(parsed).forEach(([key, val]) => {
+                                        if (key in prev || key === 'epsilon' || key === 'method') {
+                                            // Handle legacy key mapping if necessary
+                                            const actualKey = (key === 'cluster_epsilon') ? 'epsilon' :
+                                                (key === 'cluster_selection_method') ? 'method' : key;
+                                            next[actualKey] = val;
+                                        }
+                                    });
+                                    return next;
+                                });
+                            }
+                        } catch (e) { }
+                    }
+                }
+            };
+
+            const runOrganizer = async (isRealRun = false) => {
+                if (isRunning) return;
+
+                // Sync the path to the backend first
+                if (organizedPath) {
+                    await updateBackendRoot(organizedPath);
+                }
+
+                setIsRunning(true);
+                setShowPathPrompt(false);
+                setProgressLog([]);
+                setSelectedCluster(null);
+
+                const finalParams = { ...aiParams, dry_run: !isRealRun };
+                // Override disabled plugins: send 0 for weights, false for bools
+                paramSchema.forEach(p => {
+                    if (p.is_plugin && enabledPlugins[p.key] === false) {
+                        finalParams[p.key] = p.type === 'bool' ? false : 0;
+                    }
+                });
+
+                try {
+                    const res = await fetch(`${serverUrl}/api/run`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(finalParams)
+                    });
+
+                    if (!res.ok) {
+                        const err = await res.json();
+                        alert("Run failed: " + err.error);
+                        setIsRunning(false);
+                        return;
+                    }
+
+                    // Start polling for completion & progress
+                    const poll = setInterval(async () => {
+                        try {
+                            const progRes = await fetch(`${serverUrl}/api/progress`);
+                            if (progRes.ok) {
+                                const progData = await progRes.json();
+                                setProgressLog(progData.log || []);
+                                if (!progData.running) {
+                                    clearInterval(poll);
+                                    setIsRunning(false);
+                                    await loadLatestLog();
+                                }
+                            } else {
+                                // Fallback
+                                const statusRes = await fetch(`${serverUrl}/api/status_job`);
+                                const statusData = await statusRes.json();
+                                if (!statusData.running) {
+                                    clearInterval(poll);
+                                    setIsRunning(false);
+                                    await loadLatestLog();
+                                }
+                            }
+                        } catch (e) {
+                            clearInterval(poll);
+                            setIsRunning(false);
+                        }
+                    }, 500); // Poll every 500ms for smooth logs
+
+                } catch (e) {
+                    alert("Failed to communicate with helper.");
+                    setIsRunning(false);
+                }
+            };
+
+            const runDiagnostics = async () => {
+                const targetPath = diagPath || organizedPath;
+                if (isDiagnosing || !targetPath) return;
+                setIsDiagnosing(true);
+                setDiagResult(null);
+                setShowDiagPathPrompt(false);
+                try {
+                    // Respect plugin toggles for diagnostic weights
+                    const tw = (enabledPlugins['enable_ai_clustering'] !== false && enabledPlugins['temporal_weight'] !== false) ? aiParams.temporal_weight : 0;
+                    const fw = (enabledPlugins['enable_ai_clustering'] !== false && enabledPlugins['filename_weight'] !== false) ? aiParams.filename_weight : 0;
+                    const cw = (enabledPlugins['enable_ai_clustering'] !== false && enabledPlugins['color_weight'] !== false) ? aiParams.color_weight : 0;
+                    const hw = (enabledPlugins['enable_ai_clustering'] !== false && enabledPlugins['near_duplicate_weight'] !== false) ? (aiParams.hash_weight || aiParams.near_duplicate_weight || 0) : 0;
+                    const vw = (enabledPlugins['enable_ai_clustering'] !== false) ? (aiParams.visual_weight ?? 1.0) : 0;
+
+                    const res = await fetch(`${serverUrl}/api/diagnose`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            folder: targetPath,
+                            temporal_weight: tw,
+                            filename_weight: fw,
+                            color_weight: cw,
+                            hash_weight: hw,
+                            visual_weight: vw
+                        })
+                    });
+                    const result = await res.json();
+                    if (res.ok) {
+                        setDiagResult(result);
+                    } else {
+                        alert("Diagnostic failed: " + result.error);
+                    }
+                } catch (e) {
+                    alert("Failed to reach diagnostic service.");
+                } finally {
+                    setIsDiagnosing(false);
+                }
+            };
+
+            const applyDiagSettings = () => {
+                if (!diagResult) return;
+                setAiParams(prev => ({
+                    ...prev,
+                    epsilon: diagResult.recommendations.suggested_epsilon,
+                    min_cluster_size: diagResult.recommendations.suggested_min_samples
+                }));
+                setDiagResult(null);
+            };
+
+            const handleFileUpload = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                Papa.parse(file, {
+                    header: true,
+                    skipEmptyLines: true,
+                    complete: (results) => {
+                        setData(results.data);
+                        processLogMetadata(results.data);
+                    }
+                });
+            };
+
+            const groups = useMemo(() => {
+                const map = {};
+                data.forEach(item => {
+                    const id = item.Cluster_ID || "unknown";
+                    if (!map[id]) map[id] = [];
+                    map[id].push(item);
+                });
+                return map;
+            }, [data]);
+
+            const getImageUrl = (item) => {
+                if (!item) return "";
+                const origPath = item.Original_Path || item.Old_Path || item.Source_Path;
+                const newPath = item.New_Path || item.Destination_Path;
+
+                if ((isVirtualMode || manualVirtualMode) && origPath) {
+                    const absPath = origPath.replace(/\\/g, "/");
+                    return `${serverUrl}/_abs/${encodeURIComponent(absPath)}`;
+                }
+
+                let rawPath = (newPath || "").replace("[DRY RUN] ", "").replace(/\\/g, "/");
+                const marker = "/organized/";
+                const markerIdx = rawPath.toLowerCase().lastIndexOf(marker);
+
+                let rel = "";
+                if (markerIdx !== -1) {
+                    rel = rawPath.substring(markerIdx + marker.length);
+                } else if (organizedPath) {
+                    const root = organizedPath.replace(/\\/g, "/").toLowerCase();
+                    const idx = rawPath.toLowerCase().lastIndexOf(root);
+                    if (idx !== -1) rel = rawPath.substring(idx + root.length);
+                    else rel = rawPath.split("/").slice(-2).join("/");
+                } else {
+                    rel = rawPath.split("/").slice(-2).join("/");
+                }
+
+                if (rel.startsWith("/")) rel = rel.substring(1);
+                return `${serverUrl}/${rel.split('/').map(encodeURIComponent).join('/')}`;
+            };
+
+            if (data.length === 0) {
+                return (
+                    <div className="min-h-screen flex flex-col items-center justify-center p-6 text-center">
+                        <div className="glass p-12 rounded-3xl amber-glow max-w-lg">
+                            <h1 className="text-4xl font-bold mb-4 bg-gradient-to-r from-amber-400 to-orange-500 bg-clip-text text-transparent">
+                                Media Visualizer
+                            </h1>
+                            <p className="text-slate-400 mb-8 leading-relaxed italic">
+                                Preview. Tune. Commit.
+                            </p>
+
+                            <div className="flex flex-col gap-4">
+                                <button
+                                    onClick={loadLatestLog}
+                                    className="bg-slate-800 hover:bg-slate-700 text-white font-bold py-4 px-8 rounded-2xl transition-all flex items-center justify-center gap-2 border border-slate-700"
+                                >
+                                    <i data-lucide="refresh-cw" className="w-5 h-5"></i>
+                                    Load Latest Results
+                                </button>
+
+                                <label className="cursor-pointer bg-slate-900/50 hover:bg-slate-900 text-slate-400 py-3 px-8 rounded-2xl transition-all border border-slate-700/50 flex items-center justify-center gap-2 text-sm">
+                                    <i data-lucide="upload" className="w-4 h-4"></i>
+                                    Upload Specific CSV
+                                    <input type="file" className="hidden" accept=".csv" onChange={handleFileUpload} />
+                                </label>
+
+                                <div className="mt-8 bg-slate-900/50 p-6 rounded-2xl border border-slate-700/30 text-left">
+                                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest block mb-2">Media Scan Directory</span>
+                                    <input
+                                        className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-slate-300 focus:outline-none focus:border-amber-500/50 mb-3"
+                                        placeholder="D:/Photos/unsorted/..."
+                                        value={organizedPath}
+                                        onChange={(e) => setOrganizedPath(e.target.value)}
+                                    />
+                                    <button
+                                        onClick={() => updateBackendRoot(organizedPath)}
+                                        className="w-full bg-amber-500 hover:bg-amber-600 text-white font-bold py-2 rounded-lg text-xs transition-colors"
+                                    >
+                                        Set Scan Directory
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            const clusterKeys = Object.keys(groups).sort((a, b) => {
+                if (a === "noise") return 1;
+                if (b === "noise") return -1;
+                return a.localeCompare(b);
+            });
+
+            const stats = {
+                totalFiles: data.length,
+                clusters: clusterKeys.filter(k => k.startsWith("group_")).length,
+                noise: groups["noise"]?.length || 0,
+                duplicates: groups["duplicate"]?.length || 0
+            };
+
+            return (
+                <div className="flex h-screen overflow-hidden text-slate-300">
+                    {/* Left Sidebar: Controls \u0026 Tuning */}
+                    <aside className="w-80 bg-[#0c1222] border-r border-slate-800 flex flex-col overflow-hidden shadow-2xl z-20">
+                        <div className="p-6 border-b border-white/5 bg-gradient-to-b from-slate-900/50 to-transparent">
+                            <div className="flex items-center gap-3 mb-6">
+                                <div className="w-10 h-10 bg-gradient-to-br from-amber-400 to-orange-600 rounded-xl flex items-center justify-center shadow-lg shadow-amber-500/20">
+                                    <i data-lucide="sliders" className="text-white w-5 h-5"></i>
+                                </div>
+                                <h2 className="text-lg font-bold text-white tracking-tight">Tuning Lab</h2>
+                            </div>
+
+                            {/* Run Controls */}
+                            <div className="flex flex-col gap-3">
+                                {!showPathPrompt ? (
+                                    <>
+                                        <button
+                                            onClick={() => { setShowPathPrompt(true); setPendingRealRun(false); }}
+                                            disabled={isRunning}
+                                            className={`w-full ${isRunning ? 'bg-slate-800' : 'bg-amber-500 hover:bg-amber-400 shadow-lg shadow-amber-500/10'} text-white font-bold py-3 rounded-xl transition-all flex items-center justify-center gap-2 text-sm uppercase tracking-wider`}
+                                        >
+                                            <i data-lucide={isRunning ? "loader-2" : "play"} className={`w-4 h-4 ${isRunning ? 'animate-spin' : ''}`}></i>
+                                            {isRunning ? "Running AI..." : "Update Preview"}
+                                        </button>
+
+                                        {!isVirtualMode && (
+                                            <button
+                                                onClick={() => { setShowPathPrompt(true); setPendingRealRun(true); }}
+                                                className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-2 rounded-xl transition-all text-xs uppercase tracking-widest border border-indigo-400/20 flex items-center justify-center gap-2"
+                                            >
+                                                <i data-lucide="zap" className="w-3 h-3"></i>
+                                                Commit Changes (Permanent)
+                                            </button>
+                                        )}
+                                    </>
+                                ) : (
+                                    <div className="bg-slate-900/60 p-4 rounded-xl border border-amber-500/20 space-y-3">
+                                        <div className="text-[9px] font-bold text-amber-400 uppercase tracking-widest">Media Scan Directory</div>
+                                        <input
+                                            className="w-full bg-black/30 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-slate-300 focus:outline-none focus:border-amber-500/50"
+                                            placeholder="D:/Photos/unsorted/..."
+                                            value={organizedPath}
+                                            onChange={(e) => setOrganizedPath(e.target.value)}
+                                            autoFocus
+                                        />
+                                        <div className="flex gap-2">
+                                            <button
+                                                onClick={() => runOrganizer(pendingRealRun)}
+                                                disabled={!organizedPath}
+                                                className={`flex-1 ${organizedPath ? 'bg-amber-500 hover:bg-amber-400' : 'bg-slate-700 cursor-not-allowed'} text-white font-bold py-2 rounded-lg text-xs uppercase tracking-wider transition-all flex items-center justify-center gap-1`}
+                                            >
+                                                <i data-lucide="play" className="w-3 h-3"></i>
+                                                {pendingRealRun ? 'Commit' : 'Run Scan'}
+                                            </button>
+                                            <button
+                                                onClick={() => setShowPathPrompt(false)}
+                                                className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-400 rounded-lg text-xs transition-colors"
+                                            >
+                                                Cancel
+                                            </button>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        <div className="flex-1 overflow-y-auto p-6 space-y-8 scrollbar-thin">
+                            {/* Parameters */}
+                            <section>
+                                <div className="flex items-center justify-between text-[10px] font-bold text-slate-500 uppercase tracking-[0.2em] mb-4">
+                                    <span>AI Parameters</span>
+                                    <i data-lucide="brain-circuit" className="w-3 h-3 opacity-50"></i>
+                                </div>
+
+                                {!showDiagPathPrompt ? (
+                                    <button
+                                        onClick={() => { setShowDiagPathPrompt(true); setDiagPath(organizedPath || ""); }}
+                                        disabled={isDiagnosing}
+                                        className="w-full mb-6 py-2.5 bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 border border-indigo-500/20 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2"
+                                    >
+                                        <i data-lucide={isDiagnosing ? "loader-2" : "microscope"} className={`w-3.5 h-3.5 ${isDiagnosing ? 'animate-spin' : ''}`}></i>
+                                        {isDiagnosing ? "Analyzing..." : "Analyze Group Spread"}
+                                    </button>
+                                ) : (
+                                    <div className="mb-6 bg-indigo-500/5 p-3 rounded-xl border border-indigo-500/20 space-y-2">
+                                        <div className="text-[8px] font-bold text-indigo-400 uppercase tracking-widest">Diagnostic Folder Path</div>
+                                        <input
+                                            className="w-full bg-black/30 border border-slate-700 rounded-lg px-2 py-1.5 text-[10px] font-mono text-slate-300 focus:outline-none focus:border-indigo-500/50"
+                                            placeholder="C:/Manual/Group_A"
+                                            value={diagPath}
+                                            onChange={(e) => setDiagPath(e.target.value)}
+                                            autoFocus
+                                            onKeyDown={(e) => { if (e.key === 'Enter') runDiagnostics(); if (e.key === 'Escape') setShowDiagPathPrompt(false); }}
+                                        />
+                                        <div className="flex gap-2">
+                                            <button
+                                                onClick={runDiagnostics}
+                                                className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-1.5 rounded-lg text-[9px] uppercase tracking-wider transition-all"
+                                            >
+                                                Start Scan
+                                            </button>
+                                            <button
+                                                onClick={() => setShowDiagPathPrompt(false)}
+                                                className="px-2 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-400 rounded-lg text-[9px] transition-colors"
+                                            >
+                                                Cancel
+                                            </button>
+                                        </div>
+                                    </div>
+                                )}
+                                {(() => {
+                                    const groupOrder = ['core', 'clustering', 'weights', 'other'];
+                                    const sortedGroups = Object.entries(schemaGroups).sort((a, b) => {
+                                        const idxA = groupOrder.indexOf(a[0]);
+                                        const idxB = groupOrder.indexOf(b[0]);
+                                        return (idxA === -1 ? 99 : idxA) - (idxB === -1 ? 99 : idxB);
+                                    });
+
+                                    return sortedGroups.map(([groupName, params]) => {
+                                        const plugins = params.filter(p => p.is_plugin);
+                                        const nonPlugins = params.filter(p => !p.is_plugin);
+                                        const labels = {
+                                            'core': 'Operation Pipeline',
+                                            'clustering': 'AI Strategy',
+                                            'weights': 'Feature Tuning (Plugins)',
+                                            'general': 'General'
+                                        };
+                                        return (
+                                            <div key={groupName}>
+                                                <div className="text-[8px] font-bold text-slate-600 uppercase tracking-[0.3em] mb-3">{labels[groupName] || groupName}</div>
+                                                {nonPlugins.length > 0 && (
+                                                    <div className="space-y-4 mb-4">
+                                                        {nonPlugins.map(p => renderParamControl(p))}
+                                                    </div>
+                                                )}
+                                                {plugins.length > 0 && (
+                                                    <div className="space-y-2 mb-4">
+                                                        {plugins.map(p => renderPluginCard(p))}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        );
+                                    });
+                                })()}
+                            </section>
+
+                            {/* Workspace */}
+                            <section>
+                                <div className="text-[10px] font-bold text-slate-500 uppercase tracking-[0.2em] mb-4">Workspace</div>
+                                <div className="bg-slate-900/40 p-3 rounded-2xl border border-white/5 flex flex-col gap-3">
+                                    <div className="flex items-center justify-between text-[9px] font-bold uppercase">
+                                        <span className="text-slate-500">Virtual Mode</span>
+                                        <button
+                                            onClick={() => setManualVirtualMode(!manualVirtualMode)}
+                                            className={`w-8 h-4 rounded-full transition-colors relative ${manualVirtualMode || isVirtualMode ? 'bg-indigo-500' : 'bg-slate-700'}`}
+                                        >
+                                            <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${manualVirtualMode || isVirtualMode ? 'left-4' : 'left-0.5'}`}></div>
+                                        </button>
+                                    </div>
+                                    <input
+                                        className="w-full bg-black/20 border border-slate-700/50 rounded-lg px-2 py-2 text-[10px] font-mono text-slate-400 focus:outline-none focus:border-amber-500/30"
+                                        placeholder="Path..."
+                                        value={organizedPath}
+                                        onChange={(e) => setOrganizedPath(e.target.value)}
+                                    />
+                                </div>
+                            </section>
+                        </div>
+
+                        {/* Summary Footer */}
+                        <div className="p-6 bg-black/20 border-t border-white/5 grid grid-cols-2 gap-3">
+                            <div className="bg-slate-900/50 p-3 rounded-xl border border-white/5">
+                                <span className="text-[9px] text-slate-500 font-bold uppercase block mb-1">Items</span>
+                                <span className="text-lg font-black text-white leading-none">{stats.totalFiles}</span>
+                            </div>
+                            <div className="bg-slate-900/50 p-3 rounded-xl border border-white/5">
+                                <span className="text-[9px] text-slate-500 font-bold uppercase block mb-1">Groups</span>
+                                <span className="text-lg font-black text-white leading-none">{stats.clusters}</span>
+                            </div>
+                        </div>
+                    </aside >
+
+                    {/* Navigation Sidebar: Groups */}
+                    < nav className="w-64 bg-[#0a0f1d] border-r border-slate-800 flex flex-col h-full overflow-hidden" >
+                        <div className="p-4 border-b border-white/5 flex items-center justify-between">
+                            <span className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-600">Inventory</span>
+                            <div className="p-1 bg-amber-500/10 rounded flex items-center text-amber-500 text-[8px] font-bold">
+                                {stats.clusters} NEW
+                            </div>
+                        </div>
+                        <div className="flex-1 overflow-y-auto p-4 space-y-2 scrollbar-none">
+                            {clusterKeys.map(key => {
+                                const isSelected = selectedCluster === key;
+                                const count = groups[key].length;
+                                const isNoise = key === "noise";
+                                const isDup = key === "duplicate";
+                                const isVideo = key.startsWith("video/");
+
+                                let label = key;
+                                if (isNoise) label = "Unsorted";
+                                if (isDup) label = "Deduplicated";
+                                if (isVideo) label = key.replace("video/", "");
+
+                                return (
+                                    <button
+                                        key={key}
+                                        onClick={() => setSelectedCluster(key)}
+                                        className={`w-full p-3 rounded-xl text-left transition-all flex items-center justify-between group relative overflow-hidden ${isSelected ? 'bg-amber-500/10 text-amber-500 border border-amber-500/30' : 'hover:bg-slate-800/50 text-slate-400 border border-transparent'
+                                            }`}
+                                    >
+                                        <div className="flex items-center gap-3 relative z-10">
+                                            <i data-lucide={isNoise ? "help-circle" : (isDup ? "copy" : (isVideo ? "video" : "folder"))} className={`w-3.5 h-3.5 ${isSelected ? "text-amber-500" : "text-slate-600"}`}></i>
+                                            <span className="text-xs font-bold leading-none truncate max-w-[120px]">{label}</span>
+                                        </div>
+                                        <span className={`text-[9px] font-black px-1.5 py-0.5 rounded border relative z-10 ${isSelected ? "bg-amber-500 text-white border-amber-400" : "bg-slate-900 border-slate-700 text-slate-500"}`}>
+                                            {count}
+                                        </span>
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    </nav >
+
+                    {/* Main Workspace */}
+                    < main className="flex-1 flex flex-col bg-[#050914] relative overflow-hidden" >
+                        {
+                            selectedCluster ? (
+                                <div className="flex flex-col h-full" >
+                                    <header className="p-10 pb-6 flex justify-between items-end backdrop-blur-xl bg-slate-950/20 border-b border-white/5">
+                                        <div>
+                                            <div className="flex items-center gap-2 text-amber-500 text-[10px] font-black uppercase tracking-[0.3em] mb-3">
+                                                <div className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></div>
+                                                Group Resolution
+                                            </div>
+                                            <h1 className="text-5xl font-black text-white tracking-tighter capitalize leading-none">{selectedCluster.replace("_", " ")}</h1>
+                                            <div className="flex gap-4 mt-6">
+                                                <div className="flex flex-col">
+                                                    <span className="text-[9px] font-bold uppercase text-slate-600">Populated</span>
+                                                    <span className="text-sm font-bold text-slate-400">{groups[selectedCluster].length} Files</span>
+                                                </div>
+                                                <div className="w-[1px] h-full bg-slate-800"></div>
+                                                <div className="flex flex-col">
+                                                    <span className="text-[9px] font-bold uppercase text-slate-600">Diagnostic</span>
+                                                    <span className="text-sm font-bold text-slate-400 truncate max-w-[300px]">{groups[selectedCluster][0].Reason || "Organic grouping"}</span>
+                                                </div>
+                                                <div className="w-[1px] h-full bg-slate-800"></div>
+                                                <button
+                                                    onClick={() => window.open(`explorer.html?anchor=${selectedCluster}`, '_blank')}
+                                                    className="self-end px-6 py-2 bg-amber-500 text-black rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-white transition-all flex items-center gap-2 shadow-[0_0_20px_rgba(245,158,11,0.2)]"
+                                                >
+                                                    <i data-lucide="cloud" className="w-4 h-4"></i>
+                                                    Cloud Explorer
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        <div className="flex items-center gap-4 bg-slate-900/50 p-1.5 rounded-2xl border border-white/5">
+                                            <button onClick={() => setGridSize(Math.max(1, gridSize - 1))} className="p-3 hover:bg-slate-800 rounded-xl transition-colors"><i data-lucide="minus" className="w-4 h-4"></i></button>
+                                            <span className="text-xs font-black min-w-[60px] text-center">{gridSize} COLUMNS</span>
+                                            <button onClick={() => setGridSize(Math.min(12, gridSize + 1))} className="p-3 hover:bg-slate-800 rounded-xl transition-colors"><i data-lucide="plus" className="w-4 h-4"></i></button>
+                                        </div>
+                                    </header>
+
+                                    <div className="flex-1 overflow-y-auto p-10 scrollbar-thin">
+                                        <div
+                                            key={selectedCluster}
+                                            className="grid gap-8"
+                                            style={{ gridTemplateColumns: `repeat(${gridSize}, minmax(0, 1fr))` }}
+                                        >
+                                            {groups[selectedCluster].map((item) => (
+                                                <MediaCard
+                                                    key={item.Original_Path || item.Old_Path || item.Source_Path || Math.random()}
+                                                    item={item}
+                                                    getImageUrl={getImageUrl}
+                                                    onImageClick={setLightboxItem}
+                                                />
+                                            ))}
+                                        </div>
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className="flex-1 flex flex-col items-center justify-center p-20">
+                                    <div className="w-32 h-32 rounded-full border border-white/5 flex items-center justify-center mb-8 relative">
+                                        <div className="absolute inset-0 rounded-full border-2 border-amber-500/20 border-t-amber-500 animate-spin"></div>
+                                        <i data-lucide="crosshair" className="w-12 h-12 text-slate-800"></i>
+                                    </div>
+                                    <h1 className="text-xl font-black text-slate-700 uppercase tracking-[0.5em]">Target Selection Required</h1>
+                                    <p className="text-xs text-slate-800 mt-4 max-w-xs text-center leading-relaxed">Choose a data cluster from the sidebar to inspect the AI's grouping logic and visual relevance.</p>
+                                </div>
+                            )
+                        }
+
+                        {/* Status Footer */}
+                        <footer className="h-10 bg-[#070c18] border-t border-white/5 flex items-center justify-between px-6 text-[9px] font-black uppercase tracking-widest text-slate-600">
+                            <div className="flex gap-6 items-center">
+                                <div className="flex items-center gap-2">
+                                    <div className={`w-1.5 h-1.5 rounded-full ${serverStatus === 'connected' ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]' : 'bg-rose-500 animate-pulse'}`}></div>
+                                    {serverStatus === 'connected' ? 'Core Online' : 'Core Disconnected'}
+                                </div>
+                                <div className="opacity-40">Build 03.01.2026.R2</div>
+                            </div>
+                            <div className="flex items-center gap-4">
+                                <span className="opacity-40">Mounted:</span>
+                                <span className="text-amber-500/70 font-mono lower-case tracking-normal">{backendRoot || 'none'}</span>
+                            </div>
+                        </footer>
+                    </main >
+
+                    {/* Progress Streaming Overlay */}
+                    {
+                        isRunning && (
+                            <div className="absolute inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-12 overflow-hidden">
+                                <div className="bg-[#0a0f1d] border border-white/10 rounded-2xl w-full max-w-4xl h-full flex flex-col shadow-2xl relative">
+                                    <div className="p-5 border-b border-white/5 flex items-center gap-4 bg-slate-900/50 shrink-0">
+                                        <div className="w-8 h-8 rounded-full border-2 border-amber-500/20 border-t-amber-500 animate-spin"></div>
+                                        <div>
+                                            <h3 className="text-sm font-black text-white uppercase tracking-widest">Executing AI Routine</h3>
+                                            <p className="text-[10px] text-amber-500 font-bold uppercase tracking-widest animate-pulse">Processing Data Stream...</p>
+                                        </div>
+                                    </div>
+                                    <div className="flex-1 p-6 bg-black/50 font-mono text-[10px] text-slate-400 overflow-y-auto scrollbar-thin flex flex-col items-start gap-1">
+                                        {progressLog.length === 0 ? (
+                                            <div className="text-slate-600 animate-pulse text-center w-full my-auto text-xs uppercase tracking-[0.2em] font-black">Initializing Backend Link...</div>
+                                        ) : (
+                                            progressLog.map((line, i) => {
+                                                const isError = line.toLowerCase().includes("error") || line.toLowerCase().includes("failed");
+                                                const isSuccess = line.includes("successfully");
+                                                let colorClass = "text-slate-400";
+                                                if (isError) colorClass = "text-rose-500 font-bold";
+                                                if (isSuccess) colorClass = "text-emerald-500 font-bold";
+
+                                                return (
+                                                    <div key={i} className={`whitespace-pre-wrap flex gap-3 ${colorClass} w-full hover:bg-white/5 px-2 py-1 rounded-sm transition-colors`}>
+                                                        <span className="text-slate-700 select-none opacity-50">{String(i).padStart(4, '0')}</span>
+                                                        <span>{line}</span>
+                                                    </div>
+                                                );
+                                            })
+                                        )}
+                                        {/* Auto-scroll anchor */}
+                                        <div ref={(el) => { el?.scrollIntoView(); }}></div>
+                                    </div>
+                                </div>
+                            </div>
+                        )
+                    }
+
+                    {/* Lightbox Overlay */}
+                    {
+                        lightboxItem && (
+                            <div
+                                className="fixed inset-0 z-[60] bg-black/90 backdrop-blur-md flex items-center justify-center cursor-pointer"
+                                onClick={() => setLightboxItem(null)}
+                                style={{ animation: 'fadeIn 0.2s ease-out' }}
+                            >
+                                <img
+                                    src={getImageUrl(lightboxItem)}
+                                    className="max-w-[90vw] max-h-[85vh] object-contain rounded-2xl shadow-2xl"
+                                    style={{ animation: 'scaleIn 0.25s ease-out' }}
+                                    onClick={(e) => { e.stopPropagation(); setLightboxItem(null); }}
+                                />
+                                <div className="absolute bottom-8 left-1/2 -translate-x-1/2 bg-black/60 backdrop-blur-sm px-8 py-3 rounded-2xl border border-white/10 flex items-center gap-6">
+                                    <div className="flex flex-col">
+                                        <span className="text-[9px] font-bold uppercase text-slate-500 tracking-widest">File</span>
+                                        <span className="text-xs font-bold text-white">{lightboxItem.New_Filename || lightboxItem.Filename || "unknown"}</span>
+                                    </div>
+                                    <div className="w-px h-8 bg-white/10"></div>
+                                    <div className="flex flex-col">
+                                        <span className="text-[9px] font-bold uppercase text-slate-500 tracking-widest">Cluster</span>
+                                        <span className="text-xs font-bold text-amber-500">{lightboxItem.Cluster_ID || "none"}</span>
+                                    </div>
+                                    <div className="w-px h-8 bg-white/10"></div>
+                                    <div className="flex flex-col">
+                                        <span className="text-[9px] font-bold uppercase text-slate-500 tracking-widest">Reason</span>
+                                        <span className="text-xs font-bold text-slate-400 max-w-[300px] truncate">{lightboxItem.Reason || "—"}</span>
+                                    </div>
+                                </div>
+                                <button
+                                    className="absolute top-6 right-6 text-white/40 hover:text-white transition-colors"
+                                    onClick={(e) => { e.stopPropagation(); setLightboxItem(null); }}
+                                >
+                                    <i data-lucide="x" className="w-6 h-6"></i>
+                                </button>
+                            </div>
+                        )
+                    }
+
+                    {/* Diagnostic Result Modal */}
+                    {
+                        diagResult && (
+                            <div className="fixed inset-0 z-[70] bg-black/80 backdrop-blur-md flex items-center justify-center p-6">
+                                <div className="glass p-8 rounded-3xl w-full max-w-md border-amber-500/30 shadow-[0_0_50px_rgba(245,158,11,0.1)] relative" style={{ animation: 'scaleIn 0.3s ease-out' }}>
+                                    <div className="flex items-center gap-3 mb-6">
+                                        <div className="w-10 h-10 bg-amber-500 rounded-xl flex items-center justify-center shadow-lg shadow-amber-500/20">
+                                            <i data-lucide="microscope" className="text-white w-5 h-5"></i>
+                                        </div>
+                                        <div>
+                                            <h3 className="text-sm font-black text-white uppercase tracking-widest">Diagnostic Report</h3>
+                                            <p className="text-[9px] text-slate-500 font-bold uppercase tracking-widest">Spread Analysis Complete</p>
+                                        </div>
+                                    </div>
+
+                                    <div className="space-y-4 mb-8">
+                                        <div className="grid grid-cols-2 gap-4">
+                                            <div className="bg-slate-900/50 p-4 rounded-2xl border border-white/5">
+                                                <span className="text-[9px] font-bold text-slate-500 uppercase block mb-1">Diameter (Max)</span>
+                                                <span className="text-xl font-mono font-black text-white">{diagResult.pairwise_stats.max}</span>
+                                            </div>
+                                            <div className="bg-slate-900/50 p-4 rounded-2xl border border-white/5">
+                                                <span className="text-[9px] font-bold text-slate-500 uppercase block mb-1">Density (NN1)</span>
+                                                <span className="text-xl font-mono font-black text-white">{diagResult.density.avg_nn1}</span>
+                                            </div>
+                                        </div>
+
+                                        <div className="bg-amber-500/5 border border-amber-500/20 p-5 rounded-2xl">
+                                            <div className="text-[10px] font-black text-amber-500 uppercase tracking-widest mb-4 flex items-center gap-2">
+                                                <i data-lucide="sparkles" className="w-3 h-3"></i>
+                                                AI Recommendations
+                                            </div>
+                                            <div className="space-y-3">
+                                                <div className="flex justify-between items-center">
+                                                    <span className="text-xs font-bold text-slate-400">Suggested Epsilon</span>
+                                                    <span className="text-sm font-mono font-black text-amber-400 bg-amber-400/10 px-2 py-1 rounded-lg">{diagResult.recommendations.suggested_epsilon}</span>
+                                                </div>
+                                                <div className="flex justify-between items-center">
+                                                    <span className="text-xs font-bold text-slate-400">Min Samples</span>
+                                                    <span className="text-sm font-mono font-black text-amber-400 bg-amber-400/10 px-2 py-1 rounded-lg">{diagResult.recommendations.suggested_min_samples}</span>
+                                                </div>
+                                            </div>
+                                            <p className="mt-4 text-[10px] text-slate-500 italic leading-relaxed">
+                                                {diagResult.recommendations.notes}
+                                            </p>
+                                        </div>
+                                    </div>
+
+                                    <div className="flex gap-3">
+                                        <button
+                                            onClick={applyDiagSettings}
+                                            className="flex-1 py-4 bg-amber-500 hover:bg-amber-400 text-white font-black text-xs uppercase tracking-widest rounded-2xl transition-all shadow-lg shadow-amber-500/20"
+                                        >
+                                            Apply Settings
+                                        </button>
+                                        <button
+                                            onClick={() => setDiagResult(null)}
+                                            className="px-6 py-4 bg-slate-800 hover:bg-slate-700 text-slate-400 font-black text-xs uppercase tracking-widest rounded-2xl transition-all"
+                                        >
+                                            Dismiss
+                                        </button>
+                                    </div>
+
+                                    <button
+                                        onClick={() => setDiagResult(null)}
+                                        className="absolute top-6 right-6 text-white/20 hover:text-white transition-colors"
+                                    >
+                                        <i data-lucide="x" className="w-5 h-5"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        )
+                    }
+
+                </div >
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+
+        // Refresh icons periodically
+        setInterval(() => lucide.createIcons(), 2000);
+    </script>
+
+</body>
+
+</html>

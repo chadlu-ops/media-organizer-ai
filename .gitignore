@@ -1,0 +1,13 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Output directories
+Organized/
+logs/
+
+# Optional: temporary or workspace configuration files
+.vscode/
+.idea/
+.DS_Store
