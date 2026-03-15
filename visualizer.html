@@ -182,6 +182,7 @@
             const [isTuningCollapsed, setIsTuningCollapsed] = useState(false);
             const [isInventoryCollapsed, setIsInventoryCollapsed] = useState(false);
             const [isFetchingLog, setIsFetchingLog] = useState(false);
+            const [isMenuOpen, setIsMenuOpen] = useState(false);
 
             // Lightbox navigation helpers
             const lightboxNav = useCallback((direction) => {
@@ -208,6 +209,31 @@
                 window.addEventListener('keydown', handleKey);
                 return () => window.removeEventListener('keydown', handleKey);
             }, [lightboxItem, lightboxNav]);
+
+            // Handle Menu Click Away
+            useEffect(() => {
+                const handleClick = (e) => {
+                    if (isMenuOpen && !e.target.closest('.app-menu-container')) {
+                        setIsMenuOpen(false);
+                    }
+                };
+                window.addEventListener('mousedown', handleClick);
+                return () => window.removeEventListener('mousedown', handleClick);
+            }, [isMenuOpen]);
+
+            const browseLogs = async () => {
+                try {
+                    await fetch(`${serverUrl}/api/browse_logs`, { method: 'POST' });
+                    setIsMenuOpen(false);
+                } catch (e) {
+                    console.error("Failed to open logs folder", e);
+                }
+            };
+
+            const triggerFileLoad = () => {
+                document.getElementById('hidden-log-picker').click();
+                setIsMenuOpen(false);
+            };
 
             const [paramSchema, setParamSchema] = useState([]);
             const [aiParams, setAiParams] = useState({});
@@ -258,10 +284,18 @@
                         schema.forEach(p => {
                             defaults[p.key] = p.default;
                             if (p.is_plugin) {
-                                // Plugins with non-zero/non-false defaults are enabled
-                                pluginDefaults[p.key] = p.type === 'bool' ? true : (p.default > 0);
+                                // Correctly respect the default boolean/number value from schema
+                                pluginDefaults[p.key] = p.type === 'bool' ? p.default : (p.default > 0);
                             }
                         });
+
+                        // Enforce mutual exclusivity for initial plugin states
+                        if (pluginDefaults['enable_folder_flattening']) {
+                            pluginDefaults['enable_ai_clustering'] = false;
+                            pluginDefaults['group_name_matches'] = false;
+                            pluginDefaults['group_name_prefix'] = false;
+                        }
+
                         setAiParams(prev => ({ ...defaults, ...prev }));
                         setEnabledPlugins(prev => ({ ...pluginDefaults, ...prev }));
                     })
@@ -273,8 +307,6 @@
                 const currentMode = aiParams.ai_clustering_mode || 'individual';
                 if (currentMode === prevMode) return;
 
-                // 1. Save current tuning vars to the previous mode's bucket
-                // We only save keys that exist in the clustering/weights schema categories
                 const clusteringKeys = paramSchema
                     .filter(p => p.group === 'clustering' || p.group === 'weights')
                     .map(p => p.key);
@@ -289,7 +321,6 @@
                     [prevMode]: backup
                 }));
 
-                // 2. Load settings for the new mode if they exist
                 const nextSettings = modeSettings[currentMode];
                 if (Object.keys(nextSettings).length > 0) {
                     setAiParams(prev => ({
@@ -301,6 +332,16 @@
 
                 setPrevMode(currentMode);
             }, [aiParams.ai_clustering_mode, prevMode, paramSchema]);
+
+            // React-safe Lucide initialization
+            useEffect(() => {
+                const timeout = setTimeout(() => {
+                    if (window.lucide) {
+                        lucide.createIcons();
+                    }
+                }, 100);
+                return () => clearTimeout(timeout);
+            }, [data, selectedCluster, isMenuOpen, isConsoleExpanded, isTuningCollapsed, isInventoryCollapsed, lightboxItem, diagResult]);
 
             // Toggle a plugin on/off with mutual exclusivity logic
             const togglePlugin = (key) => {
@@ -493,29 +534,44 @@
             const loadLatestLog = async () => {
                 if (isFetchingLog) return;
                 setIsFetchingLog(true);
+                setIsMenuOpen(false);
                 try {
                     const res = await fetch(`${serverUrl}/api/latest_log?t=${Date.now()}`);
                     if (!res.ok) {
+                        const err = await res.json();
+                        alert("Could not find latest log: " + (err.error || "unknown error"));
                         setIsFetchingLog(false);
                         return;
                     }
                     const logInfo = await res.json();
 
                     // Fetch the actual CSV content
-                    const csvRes = await fetch(`${serverUrl}/logs/${logInfo.filename}`);
-                    if (!csvRes.ok) return;
+                    const csvRes = await fetch(`${serverUrl}/logs/${encodeURIComponent(logInfo.filename)}`);
+                    if (!csvRes.ok) {
+                        alert(`Failed to download log: ${logInfo.filename}`);
+                        return;
+                    }
                     const csvText = await csvRes.text();
 
                     Papa.parse(csvText, {
                         header: true,
                         skipEmptyLines: true,
                         complete: (results) => {
-                            setData(results.data);
-                            processLogMetadata(results.data);
+                            if (results.data && results.data.length > 0) {
+                                setData(results.data);
+                                processLogMetadata(results.data);
+
+                                // Auto-select the first cluster if none selected
+                                const firstId = results.data[0].Cluster_ID || "unknown";
+                                if (!selectedCluster) setSelectedCluster(firstId);
+                            } else {
+                                alert("Loaded log is empty or invalid.");
+                            }
                         }
                     });
                 } catch (e) {
                     console.error("Failed to load latest log", e);
+                    alert("Connection error while loading log.");
                 } finally {
                     setIsFetchingLog(false);
                 }
@@ -693,8 +749,12 @@
                     header: true,
                     skipEmptyLines: true,
                     complete: (results) => {
-                        setData(results.data);
-                        processLogMetadata(results.data);
+                        if (results.data && results.data.length > 0) {
+                            setData(results.data);
+                            processLogMetadata(results.data);
+                            const firstId = results.data[0].Cluster_ID || "unknown";
+                            setSelectedCluster(firstId);
+                        }
                     }
                 });
             };
@@ -739,67 +799,6 @@
                 return `${serverUrl}/${rel.split('/').map(encodeURIComponent).join('/')}`;
             };
 
-            const EmptyState = () => (
-                <div className="flex-1 flex flex-col items-center justify-center p-6 text-center">
-                    <div className="glass p-12 rounded-3xl amber-glow max-w-lg animate-in fade-in zoom-in duration-500">
-                        <h1 className="text-4xl font-bold mb-4 bg-gradient-to-r from-amber-400 to-orange-500 bg-clip-text text-transparent">
-                            Media Visualizer
-                        </h1>
-                        <p className="text-slate-400 mb-8 leading-relaxed italic">
-                            Simulate groupings to verify tuning before processing files.
-                        </p>
-
-                        <div className="flex flex-col gap-6">
-                            <div className="bg-slate-900/50 p-6 rounded-2xl border border-slate-700/30 text-left space-y-3">
-                                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest block">Media Source Folder</span>
-                                <input
-                                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-sm font-mono text-slate-300 focus:outline-none focus:border-amber-500/50"
-                                    placeholder="E:/Media/Disorganized..."
-                                    value={organizedPath}
-                                    onChange={(e) => setOrganizedPath(e.target.value)}
-                                    onBlur={() => updateBackendRoot(organizedPath)}
-                                />
-                                <div className="grid grid-cols-2 gap-3 pt-2">
-                                    <button
-                                        onClick={() => runOrganizer(false)}
-                                        disabled={!organizedPath || isRunning}
-                                        className="bg-amber-500 hover:bg-amber-400 text-white font-black py-3 rounded-xl text-[10px] uppercase tracking-widest transition-all shadow-lg shadow-amber-500/10 active:scale-95 flex items-center justify-center gap-2"
-                                    >
-                                        <i data-lucide="play" className="w-3.5 h-3.5"></i>
-                                        Simulate Scan
-                                    </button>
-                                    <button
-                                        onClick={() => runOrganizer(true)}
-                                        disabled={!organizedPath || isRunning}
-                                        className="bg-indigo-600 hover:bg-indigo-500 text-white font-black py-3 rounded-xl text-[10px] uppercase tracking-widest transition-all shadow-lg shadow-indigo-500/10 active:scale-95 flex items-center justify-center gap-2"
-                                    >
-                                        <i data-lucide="zap" className="w-3.5 h-3.5"></i>
-                                        Live Run
-                                    </button>
-                                </div>
-                            </div>
-
-                            <div className="h-px bg-slate-800 w-full"></div>
-
-                            <div className="grid grid-cols-2 gap-4">
-                                <button
-                                    onClick={loadLatestLog}
-                                    className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold py-3 px-4 rounded-xl transition-all border border-slate-700 flex items-center justify-center gap-2 text-xs active:scale-95"
-                                >
-                                    <i data-lucide="history" className="w-4 h-4 text-amber-500/70"></i>
-                                    Recent Run
-                                </button>
-
-                                <label className="cursor-pointer bg-slate-800 hover:bg-slate-700 text-slate-300 py-3 px-4 rounded-xl transition-all border border-slate-700 flex items-center justify-center gap-2 text-xs font-bold active:scale-95">
-                                    <i data-lucide="file-up" className="w-4 h-4 text-amber-500/70"></i>
-                                    Open Log
-                                    <input type="file" className="hidden" accept=".csv" onChange={handleFileUpload} />
-                                </label>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            );
 
             const clusterKeys = Object.keys(groups).sort((a, b) => {
                 if (a === "noise") return 1;
@@ -827,11 +826,48 @@
                             <i data-lucide={isTuningCollapsed ? 'chevron-right' : 'chevron-left'} className="w-3 h-3 text-slate-500 group-hover:text-amber-400 transition-colors"></i>
                         </button>
                         <div className={`p-6 border-b border-white/5 bg-gradient-to-b from-slate-900/50 to-transparent ${isTuningCollapsed ? 'hidden' : ''}`}>
-                            <div className="flex items-center gap-3 mb-6">
-                                <div className="w-10 h-10 bg-gradient-to-br from-amber-400 to-orange-600 rounded-xl flex items-center justify-center shadow-lg shadow-amber-500/20">
+                            <div className="flex items-center gap-3 mb-6 relative app-menu-container">
+                                <button
+                                    onClick={() => setIsMenuOpen(!isMenuOpen)}
+                                    className="w-10 h-10 bg-gradient-to-br from-amber-400 to-orange-600 rounded-xl flex items-center justify-center shadow-lg shadow-amber-500/20 hover:scale-105 transition-all active:scale-95"
+                                >
                                     <i data-lucide="sliders" className="text-white w-5 h-5"></i>
-                                </div>
+                                </button>
                                 <h2 className="text-lg font-bold text-white tracking-tight">Tuning Lab</h2>
+
+                                {isMenuOpen && (
+                                    <div className="absolute top-12 left-0 w-48 bg-slate-800/95 backdrop-blur-xl border border-white/10 rounded-xl shadow-2xl z-[100] py-2 animate-in fade-in slide-in-from-top-2 duration-200">
+                                        <button
+                                            onClick={loadLatestLog}
+                                            className="w-full px-4 py-2.5 text-left text-[11px] font-bold text-slate-300 hover:bg-white/5 flex items-center gap-3 transition-colors"
+                                        >
+                                            <i data-lucide="zap" className="w-4 h-4 text-amber-500"></i>
+                                            Load Latest Log
+                                        </button>
+                                        <button
+                                            onClick={triggerFileLoad}
+                                            className="w-full px-4 py-2.5 text-left text-[11px] font-bold text-slate-300 hover:bg-white/5 flex items-center gap-3 transition-colors"
+                                        >
+                                            <i data-lucide="file-up" className="w-4 h-4 text-amber-500"></i>
+                                            Load Log File...
+                                        </button>
+                                        <div className="h-px bg-white/5 my-1 mx-2"></div>
+                                        <button
+                                            onClick={browseLogs}
+                                            className="w-full px-4 py-2.5 text-left text-[11px] font-bold text-slate-300 hover:bg-white/5 flex items-center gap-3 transition-colors"
+                                        >
+                                            <i data-lucide="external-link" className="w-4 h-4 text-slate-500"></i>
+                                            Browse Logs Folder
+                                        </button>
+                                        <input
+                                            type="file"
+                                            id="hidden-log-picker"
+                                            className="hidden"
+                                            accept=".csv"
+                                            onChange={handleFileUpload}
+                                        />
+                                    </div>
+                                )}
                             </div>
 
                             {/* Action Panel */}
@@ -985,13 +1021,6 @@
                                             <div className={`w-1.5 h-1.5 rounded-full ${isVirtualMode ? 'bg-amber-500 animate-pulse shadow-[0_0_5px_rgba(245,158,11,0.5)]' : 'bg-slate-700'}`}></div>
                                         </div>
                                     </div>
-                                    <div className="grid grid-cols-2 gap-2">
-                                        <button onClick={loadLatestLog} className="py-2.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-[9px] font-black text-slate-300 uppercase tracking-widest transition-all active:scale-95">Latest</button>
-                                        <label className="py-2.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-[9px] font-black text-slate-300 uppercase tracking-widest text-center cursor-pointer transition-all active:scale-95">
-                                            Open
-                                            <input type="file" className="hidden" accept=".csv" onChange={handleFileUpload} />
-                                        </label>
-                                    </div>
                                 </div>
                             </section>
                         </div>
@@ -1100,9 +1129,12 @@
                     {/* Main Workspace */}
                     <main className="flex-1 flex flex-col bg-[#050914] relative overflow-hidden">
                         {data.length === 0 ? (
-                            <EmptyState />
+                            <div key="workspace-empty" className="flex-1 flex flex-col items-center justify-center opacity-20 grayscale pointer-events-none select-none">
+                                <i data-lucide="cloud-off" className="w-16 h-16 mb-4 text-slate-700"></i>
+                                <span className="text-[10px] font-black uppercase tracking-widest text-slate-800">No Log Loaded</span>
+                            </div>
                         ) : selectedCluster ? (
-                            <div className="flex-1 flex flex-col overflow-hidden">
+                            <div key="workspace-active" className="flex-1 flex flex-col overflow-hidden">
                                 <header className="p-10 pb-6 flex justify-between items-end backdrop-blur-xl bg-slate-950/20 border-b border-white/5">
                                     <div>
                                         <div className="flex items-center gap-2 text-amber-500 text-[10px] font-black uppercase tracking-[0.3em] mb-3">
@@ -1156,7 +1188,7 @@
                                 </div>
                             </div>
                         ) : (
-                            <div className="flex-1 flex flex-col items-center justify-center p-20">
+                            <div key="workspace-select-prompt" className="flex-1 flex flex-col items-center justify-center p-20">
                                 <div className="w-32 h-32 rounded-full border border-white/5 flex items-center justify-center mb-8 relative">
                                     <div className="absolute inset-0 rounded-full border-2 border-amber-500/20 border-t-amber-500 animate-spin"></div>
                                     <i data-lucide="crosshair" className="w-12 h-12 text-slate-800"></i>
@@ -1382,9 +1414,6 @@
 
         const root = ReactDOM.createRoot(document.getElementById('root'));
         root.render(<App />);
-
-        // Refresh icons periodically
-        setInterval(() => lucide.createIcons(), 2000);
     </script>
 
 </body>

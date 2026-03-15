@@ -125,11 +125,11 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                     self.send_json(200, media_organizer.PARAM_SCHEMA)
             except Exception as e:
                 self.send_json(500, {"error": str(e)})
-        elif self.path == '/api/status_job':
+        elif self.path == '/api/status_job' or self.path.startswith('/api/status_job?'):
             self.send_json(200, {"running": IS_RUNNING})
-        elif self.path == '/api/progress':
+        elif self.path == '/api/progress' or self.path.startswith('/api/progress?'):
             self.send_json(200, {"running": IS_RUNNING, "log": PROGRESS_LOG[-100:]})
-        elif self.path == '/api/latest_log':
+        elif self.path == '/api/latest_log' or self.path.startswith('/api/latest_log?'):
             try:
                 log_dir = Path(__file__).parent / "logs"
                 if not log_dir.exists():
@@ -155,7 +155,7 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_POST(self):
         global CURRENT_ROOT, IS_RUNNING, PROGRESS_LOG
-        if self.path == '/api/set_root':
+        if self.path == '/api/set_root' or self.path.startswith('/api/set_root?'):
             content_length = int(self.headers['Content-Length'])
             post_data = self.rfile.read(content_length)
             try:
@@ -189,6 +189,19 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                 try:
                     self.send_json(500, {"error": str(e)})
                 except: pass
+
+        elif self.path == '/api/browse_logs':
+            try:
+                log_dir = SCRIPT_DIR / "logs"
+                if not log_dir.exists():
+                    log_dir.mkdir(parents=True, exist_ok=True)
+                
+                print(f"[API] Opening logs folder: {log_dir}")
+                os.startfile(str(log_dir))
+                self.send_json(200, {"status": "success"})
+            except Exception as e:
+                print(f"[API] ERROR opening logs folder: {e}")
+                self.send_json(500, {"error": str(e)})
         
         elif self.path == '/api/run':
             content_length = int(self.headers.get('Content-Length', 0))
