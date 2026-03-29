@@ -23,6 +23,7 @@ import re
 import shutil
 import subprocess
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -51,6 +52,7 @@ LOG_COLUMNS = [
     "Match_Confidence",
     "Settings",
     "Near_Misses",
+    "Review_Needed",
 ]
 
 # ---------------------------------------------------------------------------
@@ -139,8 +141,29 @@ PARAM_SCHEMA = [
         "default": True,
         "label": "Video De-duplication",
         "tooltip": "Uses fast binary hashing to identify exact duplicate video files, moving redundant copies to a dedicated folder.",
-        "group": "core",
         "is_plugin": True, "plugin_icon": "copy",
+    },
+    {
+        "key": "enable_perceptual_video_dedup", "cli": "--enable-perceptual-video-dedup", "type": "bool",
+        "default": False,
+        "label": "Perceptual Video Deduplication",
+        "tooltip": "Advanced 'Tri-Path' filter to identify visually similar videos at different bitrates/resolutions.",
+        "group": "core",
+        "is_plugin": True, "plugin_icon": "eye",
+    },
+    {
+        "key": "enable_deep_video_scan", "cli": "--enable-deep-video-scan", "type": "bool",
+        "default": False,
+        "label": "Deep Video Scan (Temporal)",
+        "tooltip": "Level 3 scan: Uses videohash to generate a 64-bit temporal signature. Slower but highly accurate.",
+        "group": "core",
+    },
+    {
+        "key": "video_match_threshold", "cli": "--video-match-threshold", "type": "int",
+        "default": 8, "min": 0, "max": 64,
+        "label": "Video Similarity Threshold",
+        "tooltip": "Hamming distance limit (Default 8). Lower = stricter; Higher = looser matching.",
+        "group": "core",
     },
     {
         "key": "enable_deduplication", "cli": "--enable-deduplication", "type": "bool",
@@ -432,6 +455,79 @@ def md5_hash(filepath: Path) -> str:
     return h.hexdigest()
 
 
+class VideoPerceptualHasher:
+    """
+    Implements the 'Tri-Path' video deduplication strategy.
+    Levels:
+      1. Binary MD5 (done upstream)
+      2. Keyframe 'Squint' (pHash at 20%)
+      3. Deep Temporal Hash (videohash library)
+    """
+
+    @staticmethod
+    def get_duration(filepath: Path) -> float:
+        cmd = [
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", str(filepath)
+        ]
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            return float(res.stdout.strip())
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def get_squint_hash(filepath: Path, duration: float) -> Optional[str]:
+        """Level 2: Extract frame at 20% mark, 64x64, ImageHash pHash."""
+        import imagehash
+        from PIL import Image
+
+        timestamp = duration * 0.2
+        # Use ffmpeg to grab a single frame and pipe to memory
+        cmd = [
+            "ffmpeg", "-v", "error", "-ss", str(timestamp), "-i", str(filepath),
+            "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "pipe:1"
+        ]
+        try:
+            res = subprocess.run(cmd, capture_output=True, timeout=15)
+            if res.returncode == 0:
+                from io import BytesIO
+                img = Image.open(BytesIO(res.stdout))
+                # Resize to 64x64 as per requirements
+                img = img.resize((64, 64), Image.Resampling.LANCZOS)
+                h = imagehash.phash(img)
+                return str(h)
+        except Exception as e:
+            log.warning("Squint hash failed for %s: %s", filepath.name, e)
+        return None
+
+    @staticmethod
+    def get_deep_hash(filepath: Path) -> Optional[str]:
+        """Level 3: Full temporal hash using videohash (144x144 internal)."""
+        try:
+            from videohash import VideoHash
+            vh = VideoHash(path=str(filepath))
+            return vh.hash_hex
+        except Exception as e:
+            log.warning("Deep hash failed for %s: %s", filepath.name, e)
+        return None
+
+
+def process_video_worker(args):
+    """Worker for Multiprocessing Pool."""
+    fpath, enable_perceptual, enable_deep = args
+    results = {"path": fpath, "md5": md5_hash(fpath)}
+    
+    if enable_perceptual:
+        duration = VideoPerceptualHasher.get_duration(fpath)
+        results["duration"] = duration
+        results["squint"] = VideoPerceptualHasher.get_squint_hash(fpath, duration)
+        if enable_deep:
+            results["deep"] = VideoPerceptualHasher.get_deep_hash(fpath)
+            
+    return results
+
+
 def get_exif_datetime(filepath: Path) -> Optional[datetime]:
     """Extract EXIF DateTimeOriginal from an image, or None."""
     try:
@@ -519,113 +615,171 @@ def detect_video_orientation(filepath: Path) -> str:
 
 
 def phase1_video_sorting(
-    root: Path, dry_run: bool, action: str = "copy", enable_deduplication: bool = True
+    root: Path, 
+    dry_run: bool, 
+    action: str = "copy", 
+    enable_deduplication: bool = True,
+    enable_perceptual: bool = False,
+    enable_deep: bool = False,
+    video_match_threshold: int = 8
 ) -> tuple[list[dict], list[Path]]:
     """
     Move video files into videos/horizontal/ or videos/vertical/.
-    Also performs exact binary de-duplication if enabled.
-    Returns (log_entries, remaining_files_that_are_not_videos).
+    Performs 'Tri-Path' de-duplication:
+      - Level 1: Binary MD5
+      - Level 2: Keyframe pHash (Squint)
+      - Level 3: Temporal full-video hash
     """
     log.info("=" * 60)
-    log.info("PHASE 1 — Video Sorting & De-duplication")
+    log.info("PHASE 1 — Video Sorting & Perceptual De-duplication")
     log.info("=" * 60)
 
     entries: list[dict] = []
     non_video_files: list[Path] = []
-    seen_hashes: dict[str, Path] = {}
-
+    
     org_root = root / ORGANIZED_DIR_NAME
     dest_h = org_root / "videos" / "horizontal"
     dest_v = org_root / "videos" / "vertical"
     dup_dir = org_root / "duplicates"
+    review_dir = dup_dir / "review_needed"
 
-    # 1. Pre-populate hashes from already organized videos to detect duplicates against them
-    if enable_deduplication and (org_root / "videos").exists():
-        log.info("Indexing existing organized videos for de-duplication...")
-        for p in (org_root / "videos").rglob("*"):
-            if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS:
-                try:
-                    h = md5_hash(p)
-                    if h not in seen_hashes:
-                        seen_hashes[h] = p
-                except Exception:
-                    pass
-
+    all_potential_videos = []
     for path in sorted(root.rglob("*")):
-        if not path.is_file():
+        if not path.is_file() or is_hidden(path):
             continue
-        if is_hidden(path):
-            continue
-        # Skip files already inside our output structure
         try:
             path.relative_to(org_root)
             continue
         except ValueError:
             pass
 
-        ext = path.suffix.lower()
-        if ext in VIDEO_EXTENSIONS:
-            # --- Check for duplicates if enabled ---
-            if enable_deduplication:
-                h = md5_hash(path)
-                if h in seen_hashes:
-                    dest = dup_dir / path.name
-                    if dest.exists() or any(e["New_Filename"] == dest.name for e in entries):
-                        stem = dest.stem
-                        suffix = dest.suffix
-                        dest = dup_dir / f"{stem}_{short_path_hash(path)}{suffix}"
-                    
-                    safe_action(path, dest, dry_run, action=action)
-                    entries.append({
-                        "Original_Path": str(path),
-                        "New_Path": str(dest) if not dry_run else f"[DRY RUN] {dest}",
-                        "New_Filename": dest.name,
-                        "Hash": h,
-                        "Cluster_ID": "duplicate",
-                        "Media_Type": "video",
-                        "Reason": f"Duplicate Video: Exact MD5 match ({h[:8]})",
-                        "Match_Confidence": "1.0 (Bit-for-bit)",
-                    })
-                    continue
-                else:
-                    seen_hashes[h] = path
-
-            orientation, w, h = detect_video_orientation(path)
-            if orientation == "portrait":
-                dest = dest_v / path.name
-                subfolder = "vertical"
-                reason = f"Video: Vertical ({w}x{h})"
-            else:
-                dest = dest_h / path.name
-                subfolder = "horizontal"
-                reason = f"Video: Horizontal ({w}x{h})"
-
-            # Handle name collisions in destination
-            if dest.exists() and dest != path:
-                stem = dest.stem
-                suffix = dest.suffix
-                counter = 1
-                while dest.exists():
-                    dest = dest.parent / f"{stem}_{counter}{suffix}"
-                    counter += 1
-
-            safe_action(path, dest, dry_run, action=action)
-            entries.append(
-                {
-                    "Original_Path": str(path),
-                    "New_Path": str(dest) if not dry_run else f"[DRY RUN] {dest}",
-                    "New_Filename": dest.name,
-                    "Hash": "",
-                    "Cluster_ID": f"video/{subfolder}",
-                    "Media_Type": "video",
-                    "Reason": reason,
-                    "Match_Confidence": "1.0 (Geometry)",
-                }
-            )
+        if path.suffix.lower() in VIDEO_EXTENSIONS:
+            all_potential_videos.append(path)
         else:
             non_video_files.append(path)
 
-    log.info("Phase 1 complete: %d videos sorted.", len(entries))
+    if not all_potential_videos:
+        log.info("No videos found to sort.")
+        return [], non_video_files
+
+    # 1. Parallel Hashing
+    log.info("Analyzing %d videos with parallel workers...", len(all_potential_videos))
+    worker_args = [(v, enable_perceptual, enable_deep) for v in all_potential_videos]
+    
+    video_data = []
+    # Use max_workers=None to use all cores
+    with ProcessPoolExecutor() as executor:
+        video_data = list(executor.map(process_video_worker, worker_args))
+
+    # 2. Comparison Logic
+    # Group results by various hashes
+    md5_map: dict[str, list[dict]] = defaultdict(list)
+    squint_map: dict[str, list[dict]] = defaultdict(list)
+    deep_hashes: list[dict] = []
+
+    for data in video_data:
+        md5_map[data["md5"]].append(data)
+        if data.get("squint"):
+            squint_map[data["squint"]].append(data)
+        if data.get("deep"):
+            deep_hashes.append(data)
+
+    processed_paths = set()
+
+    def handle_video(data, cluster_id, reason, confidence, dest_base_dir, review_needed=False):
+        fpath = data["path"]
+        if fpath in processed_paths:
+            return
+        
+        orientation, w, h = detect_video_orientation(fpath)
+        if dest_base_dir is None: # Duplicate/Review path
+            if review_needed:
+                dest_dir = review_dir
+            else:
+                dest_dir = dup_dir
+        else:
+            dest_dir = dest_base_dir if orientation == "landscape" else dest_v if dest_base_dir == dest_h else dest_v
+            # Wait, dest_base_dir logic was simpler:
+            if orientation == "portrait":
+                dest_dir = dest_v
+            else:
+                dest_dir = dest_h
+
+        dest = dest_dir / fpath.name
+        if dest.exists() or any(e["New_Path"] == str(dest) for e in entries):
+            stem, suffix = dest.stem, dest.suffix
+            dest = dest_dir / f"{stem}_{short_path_hash(fpath)}{suffix}"
+
+        safe_action(fpath, dest, dry_run, action=action)
+        entries.append({
+            "Original_Path": str(fpath),
+            "New_Path": str(dest) if not dry_run else f"[DRY RUN] {dest}",
+            "New_Filename": dest.name,
+            "Hash": data["md5"],
+            "Cluster_ID": cluster_id,
+            "Media_Type": "video",
+            "Reason": reason,
+            "Match_Confidence": confidence,
+            "Review_Needed": "Yes" if review_needed else "No"
+        })
+        processed_paths.add(fpath)
+
+    # Level 1: Exact MD5
+    if enable_deduplication:
+        for h, matches in md5_map.items():
+            if len(matches) > 1:
+                # Keep the first one, mark others as duplicates
+                # Sorting by path to be deterministic
+                sorted_matches = sorted(matches, key=lambda x: str(x["path"]))
+                # The "original" (to keep)
+                # Actually, in this script's flow, we move everything to 'Organized'.
+                # So the first one goes to landscape/portrait, others go to duplicate.
+                first = sorted_matches[0]
+                handle_video(first, f"video/original", "Video: Unique (Binary)", "1.0", dest_h)
+                
+                for dup in sorted_matches[1:]:
+                    handle_video(dup, "duplicate", f"Duplicate: Exact MD5 ({h[:8]})", "1.0 (Bit-for-bit)", None)
+
+    # Level 2: Squint (pHash)
+    if enable_perceptual:
+        for ph, matches in squint_map.items():
+            unprocessed = [m for m in matches if m["path"] not in processed_paths]
+            if len(unprocessed) >= 1:
+                # If there's an existing md5_map entry that WAS processed and has same ph...
+                # Actually, simpler: if phash matches and we haven't processed this file yet,
+                # it's a high-probability match to SOMETHING.
+                for match in unprocessed:
+                    # Is there ANOTHER file (processed or not) with the same pHash?
+                    others = [m for m in matches if m["path"] != match["path"]]
+                    if others:
+                        handle_video(match, "duplicate/review", f"High-Prob Match: pHash Squint ({ph})", "0.9 (Visual)", None, review_needed=True)
+
+    # Level 3: Deep (videohash)
+    if enable_deep and deep_hashes:
+        from imagehash import hex_to_hash
+        for i, data1 in enumerate(video_data):
+            if data1["path"] in processed_paths or not data1.get("deep"):
+                continue
+            
+            h1 = hex_to_hash(data1["deep"])
+            for j, data2 in enumerate(video_data):
+                if i == j or not data2.get("deep"):
+                    continue
+                
+                h2 = hex_to_hash(data2["deep"])
+                distance = h1 - h2
+                if distance <= video_match_threshold:
+                    handle_video(data1, "duplicate/review", f"Deep Match: videohash (dist {distance})", f"0.8 (Temporal)", None, review_needed=True)
+                    break
+
+    # 3. Handle remaining unique videos
+    for data in video_data:
+        if data["path"] not in processed_paths:
+            orientation, w, h = detect_video_orientation(data["path"])
+            reason = f"Video: {'Vertical' if orientation == 'portrait' else 'Horizontal'} ({w}x{h})"
+            handle_video(data, f"video/{orientation}", reason, "1.0", dest_h)
+
+    log.info("Phase 1 complete: %d videos processed.", len(entries))
     return entries, non_video_files
 
 
@@ -1561,6 +1715,32 @@ def _confirm_mode() -> tuple[bool, str]:
             print("  Invalid choice.  Enter 1 or 2.")
 
 
+def _get_video_params() -> dict:
+    """Prompt for Video Sorting & Deduplication parameters."""
+    print("\n  Video Deduplication Settings:")
+    enable_sorting = _prompt("  Enable Video Orientation Sorting? [Y/n]: ", "y").lower() == "y"
+    enable_dedup = _prompt("  Enable Binary (MD5) Deduplication? [Y/n]: ", "y").lower() == "y"
+    enable_perceptual = _prompt("  Enable Perceptual (Squint) Deduplication? [y/N]: ", "n").lower() == "y"
+    
+    enable_deep = False
+    match_threshold = 8
+    if enable_perceptual:
+        enable_deep = _prompt("  Enable Deep Temporal Scan (videohash)? [y/N]: ", "n").lower() == "y"
+        raw_thresh = _prompt("  Match Threshold (0-64) [8]: ", "8")
+        try:
+            match_threshold = int(raw_thresh)
+        except ValueError:
+            match_threshold = 8
+
+    return {
+        "enable_video_sorting": enable_sorting,
+        "enable_video_deduplication": enable_dedup,
+        "enable_perceptual_video_dedup": enable_perceptual,
+        "enable_deep_video_scan": enable_deep,
+        "video_match_threshold": match_threshold
+    }
+
+
 def _get_cluster_params() -> dict:
     """Prompt for HDBSCAN parameters with sensible defaults."""
     print("\n  Clustering Strategy:")
@@ -1678,7 +1858,14 @@ def interactive_main() -> None:
 
         # ---- Phase 1 ----
         if choice == "1":
-            video_entries, remaining_files = phase1_video_sorting(root, dry_run, action=action)
+            v_params = _get_video_params()
+            video_entries, remaining_files = phase1_video_sorting(
+                root, dry_run, action=action,
+                enable_deduplication=v_params["enable_video_deduplication"],
+                enable_perceptual=v_params["enable_perceptual_video_dedup"],
+                enable_deep=v_params["enable_deep_video_scan"],
+                video_match_threshold=v_params["video_match_threshold"]
+            )
             all_entries.extend(video_entries)
 
         # ---- Phase 2 ----
@@ -1778,7 +1965,14 @@ def interactive_main() -> None:
                 params = _get_cluster_params()
 
             # Phase 1
-            video_entries, remaining_files = phase1_video_sorting(root, dry_run, action=action)
+            v_params = _get_video_params()
+            video_entries, remaining_files = phase1_video_sorting(
+                root, dry_run, action=action,
+                enable_deduplication=v_params["enable_video_deduplication"],
+                enable_perceptual=v_params["enable_perceptual_video_dedup"],
+                enable_deep=v_params["enable_deep_video_scan"],
+                video_match_threshold=v_params["video_match_threshold"]
+            )
             all_entries.extend(video_entries)
 
             # Phase 2
@@ -1984,7 +2178,11 @@ def main() -> None:
     remaining_files = []
     if _arg("enable_video_sorting"):
         video_entries, remaining_files = phase1_video_sorting(
-            root, _arg("dry_run"), action=_arg("action"), enable_deduplication=_arg("enable_video_deduplication")
+            root, _arg("dry_run"), action=_arg("action"), 
+            enable_deduplication=_arg("enable_video_deduplication"),
+            enable_perceptual=_arg("enable_perceptual_video_dedup"),
+            enable_deep=_arg("enable_deep_video_scan"),
+            video_match_threshold=_arg("video_match_threshold")
         )
         all_entries.extend(video_entries)
     else:

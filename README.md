@@ -9,9 +9,30 @@ A sophisticated, content-aware media management suite that uses CLIP embeddings,
 The tool operates in a strictly ordered pipeline to ensure maximum data integrity and organization accuracy.
 
 ### 1. Phase 01: Video Sorting & Orientation
-- **Logic**: Uses `ffprobe` metadata to detect the encoded rotation/aspect ratio.
-- **Result**: Recursively extracts all video files and moves them into `Horizontal/` or `Vertical/` subfolders within the output directory.
-- **Tuning**: Toggle on/off via `--enable-video-sorting`.
+- **Video Sorting**: Automatically detects orientation (Horizontal/Vertical) and organizes clips accordingly.
+- **Perceptual Video Deduplication**: A advanced "Tri-Path" filter to find visually identical videos across different resolutions and bitrates.
+- **Image De-duplication**: MD5-based exact match detection for images.
+- **AI Clustering**: Content-aware grouping of images using CLIP embeddings and HDBSCAN.
+
+---
+
+## 🎥 Perceptual Video Deduplication
+
+The Media Organizer now features a robust perceptual deduplication engine for videos. This goes beyond simple file-size or binary matching.
+
+### How it Works:
+1. **Level 1 (Binary)**: Checks MD5 hashes for exact bit-for-bit copies.
+2. **Level 2 (Squint)**: Extracts a frame at the 20% mark, resizes it to 64x64, and generates a perceptual hash (pHash). Perfect for catching resized 4K/720p versions.
+3. **Level 3 (Deep)**: Uses the `videohash` library to generate a 64-bit temporal signature, identifying matches even across transcodes.
+
+### Tips & Gotchas:
+- **Processing Time**: Deep video scans (Level 3) are CPU-intensive and can take significantly longer than MD5 checks. Use the `enable_deep_video_scan` toggle cautiously.
+- **Review Queue**: Any potential matches found at Level 2 or 3 are moved to `Organized/duplicates/review_needed/` instead of the main duplicates folder. Refer to the `Review_Needed` column in your migration log.
+- **FFmpeg**: Ensure FFmpeg is installed and accessible in your system's PATH.
+
+---
+
+## ⚙️ Core Parameters
 
 ### 2. Phase 02: Binary De-duplication
 - **Logic**: Performs a rapid MD5 byte-by-byte hash of every file.

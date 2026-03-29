@@ -7,3 +7,5 @@ scikit-learn
 numpy
 tqdm
 scikit-image
+imagehash
+videohash
