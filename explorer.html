@@ -324,7 +324,7 @@
             document.getElementById('detail-img').src = getImageUrl(d.data);
             document.getElementById('detail-name').innerText = d.filename;
             document.getElementById('detail-group').innerText = d.group;
-            document.getElementById('detail-conf').innerText = d.data.Confidence;
+            document.getElementById('detail-conf').innerText = d.data.Match_Confidence;
 
             detail.classList.remove('hidden');
             setTimeout(() => {

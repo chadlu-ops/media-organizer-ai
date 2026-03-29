@@ -74,6 +74,26 @@
                 transform: scale(1);
             }
         }
+
+        /* Pipeline Tree Styling */
+        .pipeline-connector {
+            position: absolute;
+            left: 19px;
+            top: 40px;
+            bottom: -20px;
+            width: 2px;
+            background: linear-gradient(to bottom, #475569 0%, rgba(71, 85, 105, 0.1) 100%);
+            z-index: 0;
+        }
+
+        .pipeline-node:last-child .pipeline-connector {
+            display: none;
+        }
+
+        .pipeline-dot {
+            position: relative;
+            z-index: 10;
+        }
     </style>
 </head>
 
@@ -159,6 +179,29 @@
             );
         };
 
+        const PipelineNode = ({ phase, title, icon, children, isActive = true, isDeactivated = false }) => {
+            return (
+                <div className={`pipeline-node relative pb-10 ${!isActive ? 'opacity-40 grayscale pointer-events-none' : ''} ${isDeactivated ? 'opacity-25 grayscale' : ''}`}>
+                    <div className="pipeline-connector"></div>
+                    <div className="flex gap-4 relative">
+                        <div className={`pipeline-dot w-10 h-10 rounded-xl flex items-center justify-center shrink-0 shadow-lg transition-all ${isActive && !isDeactivated ? 'bg-amber-500 text-white shadow-amber-500/20' : 'bg-slate-800 text-slate-500'}`}>
+                            <i data-lucide={icon} className="w-5 h-5"></i>
+                        </div>
+                        <div className="flex-1 pt-1">
+                            <div className="flex items-center gap-3 mb-4">
+                                <span className="text-[10px] font-black text-amber-500/50 uppercase tracking-[0.2em]">{phase}</span>
+                                <h3 className="text-sm font-bold text-white tracking-tight">{title}</h3>
+                                {isDeactivated && <span className="text-[8px] font-black bg-slate-800 text-slate-500 px-1.5 py-0.5 rounded uppercase">Deactivated</span>}
+                            </div>
+                            <div className="space-y-6">
+                                {children}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
         function App() {
             const [data, setData] = useState([]);
             const [organizedPath, setOrganizedPath] = useState(localStorage.getItem("organizedRoot") || "");
@@ -183,6 +226,8 @@
             const [isInventoryCollapsed, setIsInventoryCollapsed] = useState(false);
             const [isFetchingLog, setIsFetchingLog] = useState(false);
             const [isMenuOpen, setIsMenuOpen] = useState(false);
+            const [tuningTab, setTuningTab] = useState('params'); // 'params' | 'pipeline'
+            const [logFilename, setLogFilename] = useState("");
 
             // Lightbox navigation helpers
             const lightboxNav = useCallback((direction) => {
@@ -414,21 +459,21 @@
                 const parse = p.type === 'int' ? parseInt : parseFloat;
                 const display = p.type === 'float' ? (val ?? 0).toFixed(String(step).split('.')[1]?.length || 2) : val;
                 return (
-                    <div key={p.key} className="space-y-2">
-                        <div className="flex justify-between text-[11px] font-medium items-center group relative">
+                    <div key={p.key} className="space-y-3">
+                        <div className="flex justify-between text-xs font-bold items-center group relative">
                             <div className="flex items-center gap-1.5 cursor-help">
                                 <span>{p.label}</span>
                                 <i data-lucide="info" className="w-2.5 h-2.5 text-slate-500 opacity-40 group-hover:opacity-100 group-hover:text-amber-400 transition-all"></i>
-                                <div className="absolute left-0 bottom-full mb-2 w-64 p-3 bg-slate-800/95 backdrop-blur-xl text-slate-200 text-[10px] rounded-xl shadow-2xl border border-white/10 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-[100] pointer-events-none font-medium leading-relaxed">
+                                <div className="absolute left-0 bottom-full mb-2 w-72 p-3 bg-slate-800/95 backdrop-blur-xl text-slate-200 text-[10px] rounded-xl shadow-2xl border border-white/10 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-[100] pointer-events-none font-medium leading-relaxed">
                                     <div className="text-amber-400 font-bold mb-1 uppercase tracking-tighter text-[9px]">Variable Influence</div>
                                     {p.tooltip}
                                 </div>
                             </div>
-                            <span className="text-amber-400 font-mono">{display}</span>
+                            <span className="text-amber-400 font-mono text-xs">{display}</span>
                         </div>
                         <input type="range" min={min} max={max} step={step} value={val ?? p.default}
                             onChange={(e) => update(parse(e.target.value))}
-                            className="w-full accent-amber-500 h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer" />
+                            className="w-full accent-amber-500 h-2.5 bg-slate-900/50 border border-white/5 rounded-lg appearance-none cursor-pointer shadow-inner hover:bg-slate-900 transition-colors" />
                     </div>
                 );
             };
@@ -478,15 +523,15 @@
                                     const parse = p.type === 'int' ? parseInt : parseFloat;
                                     const display = p.type === 'float' ? (val ?? 0).toFixed(String(step).split('.')[1]?.length || 2) : val;
                                     return (
-                                        <div className="space-y-1">
-                                            <div className="flex justify-between text-[9px]">
+                                        <div className="space-y-2 mt-1">
+                                            <div className="flex justify-between text-[10px] font-bold">
                                                 <span className="text-slate-600 font-mono">{min}</span>
-                                                <span className="text-amber-400 font-mono font-bold">{display}</span>
+                                                <span className="text-amber-400 font-mono">{display}</span>
                                                 <span className="text-slate-600 font-mono">{max}</span>
                                             </div>
                                             <input type="range" min={min} max={max} step={step} value={val ?? p.default}
                                                 onChange={(e) => update(parse(e.target.value))}
-                                                className="w-full accent-amber-500 h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer" />
+                                                className="w-full accent-amber-500 h-2 bg-slate-900/50 border border-white/5 rounded-lg appearance-none cursor-pointer shadow-inner hover:bg-slate-900 transition-colors" />
                                         </div>
                                     );
                                 })()}
@@ -544,6 +589,7 @@
                         return;
                     }
                     const logInfo = await res.json();
+                    setLogFilename(logInfo.filename);
 
                     // Fetch the actual CSV content
                     const csvRes = await fetch(`${serverUrl}/logs/${encodeURIComponent(logInfo.filename)}`);
@@ -745,6 +791,7 @@
             const handleFileUpload = (e) => {
                 const file = e.target.files[0];
                 if (!file) return;
+                setLogFilename(file.name);
                 Papa.parse(file, {
                     header: true,
                     skipEmptyLines: true,
@@ -816,7 +863,7 @@
             return (
                 <div className="flex h-screen overflow-hidden text-slate-300">
                     {/* Left Sidebar: Controls \u0026 Tuning */}
-                    <aside className={`${isTuningCollapsed ? 'w-14' : 'w-80'} bg-[#0c1222] border-r border-slate-800 flex flex-col overflow-hidden shadow-2xl z-20 transition-all duration-300 relative`}>
+                    <aside className={`${isTuningCollapsed ? 'w-14' : 'w-[420px]'} bg-[#0c1222] border-r border-slate-800 flex flex-col overflow-hidden shadow-2xl z-20 transition-all duration-300 relative`}>
                         {/* Collapse Toggle */}
                         <button
                             onClick={() => setIsTuningCollapsed(!isTuningCollapsed)}
@@ -870,6 +917,24 @@
                                 )}
                             </div>
 
+                            {/* Tab Switcher */}
+                            <div className="flex bg-slate-900/80 p-1 rounded-xl border border-white/5 mb-6">
+                                <button
+                                    onClick={() => setTuningTab('params')}
+                                    className={`flex-1 py-2 text-[10px] font-black uppercase tracking-widest rounded-lg transition-all flex items-center justify-center gap-2 ${tuningTab === 'params' ? 'bg-amber-500 text-white shadow-lg shadow-amber-500/10' : 'text-slate-500 hover:text-slate-400'}`}
+                                >
+                                    <i data-lucide="list" className="w-3.5 h-3.5"></i>
+                                    Static Params
+                                </button>
+                                <button
+                                    onClick={() => setTuningTab('pipeline')}
+                                    className={`flex-1 py-2 text-[10px] font-black uppercase tracking-widest rounded-lg transition-all flex items-center justify-center gap-2 ${tuningTab === 'pipeline' ? 'bg-amber-500 text-white shadow-lg shadow-amber-500/10' : 'text-slate-500 hover:text-slate-400'}`}
+                                >
+                                    <i data-lucide="git-branch" className="w-3.5 h-3.5"></i>
+                                    Pipeline Tree
+                                </button>
+                            </div>
+
                             {/* Action Panel */}
                             <div className="flex flex-col gap-4 bg-slate-900/40 p-5 rounded-2xl border border-white/5 shadow-inner">
                                 <div className="space-y-2">
@@ -911,118 +976,235 @@
                             </div>
                         </div>
 
-                        <div className={`flex-1 overflow-y-auto p-6 space-y-8 scrollbar-thin ${isTuningCollapsed ? 'hidden' : ''}`}>
-                            {/* Parameters */}
-                            <section>
-                                <div className="flex items-center justify-between text-[10px] font-bold text-slate-500 uppercase tracking-[0.2em] mb-4">
-                                    <span>AI Parameters</span>
-                                    <i data-lucide="brain-circuit" className="w-3 h-3 opacity-50"></i>
-                                </div>
-
-                                {!showDiagPathPrompt ? (
-                                    <button
-                                        onClick={() => { setShowDiagPathPrompt(true); setDiagPath(organizedPath || ""); }}
-                                        disabled={isDiagnosing}
-                                        className="w-full mb-6 py-2.5 bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 border border-indigo-500/20 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2"
-                                    >
-                                        <i data-lucide={isDiagnosing ? "loader-2" : "microscope"} className={`w-3.5 h-3.5 ${isDiagnosing ? 'animate-spin' : ''}`}></i>
-                                        {isDiagnosing ? "Analyzing..." : "Analyze Group Spread"}
-                                    </button>
-                                ) : (
-                                    <div className="mb-6 bg-indigo-500/5 p-3 rounded-xl border border-indigo-500/20 space-y-2">
-                                        <div className="text-[8px] font-bold text-indigo-400 uppercase tracking-widest">Diagnostic Folder Path</div>
-                                        <input
-                                            className="w-full bg-black/30 border border-slate-700 rounded-lg px-2 py-1.5 text-[10px] font-mono text-slate-300 focus:outline-none focus:border-indigo-500/50"
-                                            placeholder="C:/Manual/Group_A"
-                                            value={diagPath}
-                                            onChange={(e) => setDiagPath(e.target.value)}
-                                            autoFocus
-                                            onKeyDown={(e) => { if (e.key === 'Enter') runDiagnostics(); if (e.key === 'Escape') setShowDiagPathPrompt(false); }}
-                                        />
-                                        <div className="flex gap-2">
-                                            <button
-                                                onClick={runDiagnostics}
-                                                className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-1.5 rounded-lg text-[9px] uppercase tracking-wider transition-all"
-                                            >
-                                                Start Scan
-                                            </button>
-                                            <button
-                                                onClick={() => setShowDiagPathPrompt(false)}
-                                                className="px-2 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-400 rounded-lg text-[9px] transition-colors"
-                                            >
-                                                Cancel
-                                            </button>
+                        <div className={`flex-1 overflow-y-auto p-6 scrollbar-thin ${isTuningCollapsed ? 'hidden' : ''}`}>
+                            {tuningTab === 'params' ? (
+                                <div className="space-y-8 h-full">
+                                    {/* Parameters */}
+                                    <section>
+                                        <div className="flex items-center justify-between text-[10px] font-bold text-slate-500 uppercase tracking-[0.2em] mb-4">
+                                            <span>AI Parameters</span>
+                                            <i data-lucide="brain-circuit" className="w-3 h-3 opacity-50"></i>
                                         </div>
-                                    </div>
-                                )}
-                                {(() => {
-                                    const groupOrder = ['core', 'clustering', 'weights', 'name_grouping', 'other'];
-                                    const sortedGroups = Object.entries(schemaGroups).sort((a, b) => {
-                                        const idxA = groupOrder.indexOf(a[0]);
-                                        const idxB = groupOrder.indexOf(b[0]);
-                                        return (idxA === -1 ? 99 : idxA) - (idxB === -1 ? 99 : idxB);
-                                    });
 
-                                    const sectionLabels = {
-                                        'core': 'Operation Pipeline',
-                                        'clustering': 'AI Strategy',
-                                        'weights': 'Feature Tuning (AI Weights)',
-                                        'name_grouping': 'Pattern Matching (No AI)',
-                                        'general': 'General'
-                                    };
+                                        {!showDiagPathPrompt ? (
+                                            <button
+                                                onClick={() => { setShowDiagPathPrompt(true); setDiagPath(organizedPath || ""); }}
+                                                disabled={isDiagnosing}
+                                                className="w-full mb-6 py-2.5 bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 border border-indigo-500/20 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2"
+                                            >
+                                                <i data-lucide={isDiagnosing ? "loader-2" : "microscope"} className={`w-3.5 h-3.5 ${isDiagnosing ? 'animate-spin' : ''}`}></i>
+                                                {isDiagnosing ? "Analyzing..." : "Analyze Group Spread"}
+                                            </button>
+                                        ) : (
+                                            <div className="mb-6 bg-indigo-500/5 p-3 rounded-xl border border-indigo-500/20 space-y-2">
+                                                <div className="text-[8px] font-bold text-indigo-400 uppercase tracking-widest">Diagnostic Folder Path</div>
+                                                <input
+                                                    className="w-full bg-black/30 border border-slate-700 rounded-lg px-2 py-1.5 text-[10px] font-mono text-slate-300 focus:outline-none focus:border-indigo-500/50"
+                                                    placeholder="C:/Manual/Group_A"
+                                                    value={diagPath}
+                                                    onChange={(e) => setDiagPath(e.target.value)}
+                                                    autoFocus
+                                                    onKeyDown={(e) => { if (e.key === 'Enter') runDiagnostics(); if (e.key === 'Escape') setShowDiagPathPrompt(false); }}
+                                                />
+                                                <div className="flex gap-2">
+                                                    <button
+                                                        onClick={runDiagnostics}
+                                                        className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-1.5 rounded-lg text-[9px] uppercase tracking-wider transition-all"
+                                                    >
+                                                        Start Scan
+                                                    </button>
+                                                    <button
+                                                        onClick={() => setShowDiagPathPrompt(false)}
+                                                        className="px-2 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-400 rounded-lg text-[9px] transition-colors"
+                                                    >
+                                                        Cancel
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        )}
+                                        {(() => {
+                                            const groupOrder = ['core', 'clustering', 'weights', 'name_grouping', 'other'];
+                                            const sortedGroups = Object.entries(schemaGroups).sort((a, b) => {
+                                                const idxA = groupOrder.indexOf(a[0]);
+                                                const idxB = groupOrder.indexOf(b[0]);
+                                                return (idxA === -1 ? 99 : idxA) - (idxB === -1 ? 99 : idxB);
+                                            });
 
-                                    const isAiEnabled = enabledPlugins['enable_ai_clustering'] !== false;
+                                            const sectionLabels = {
+                                                'core': 'Operation Pipeline',
+                                                'clustering': 'AI Strategy',
+                                                'weights': 'Feature Tuning (AI Weights)',
+                                                'name_grouping': 'Pattern Matching (No AI)',
+                                                'general': 'General'
+                                            };
 
-                                    return sortedGroups.map(([groupName, params]) => {
-                                        // Accordion: Hide AI-dependent groups if AI is disabled
-                                        const isFlatteningEnabled = enabledPlugins['enable_folder_flattening'] === true;
-                                        const isAiDependent = groupName === 'clustering' || groupName === 'weights';
-                                        const isNameGroup = groupName === 'name_grouping';
+                                            const isAiEnabled = enabledPlugins['enable_ai_clustering'] !== false || enabledPlugins['enable_color_features'] === true;
 
-                                        if (isAiDependent && !isAiEnabled) return null;
-                                        if (isNameGroup && isFlatteningEnabled) return null;
+                                            return sortedGroups.map(([groupName, params]) => {
+                                                // Accordion: Hide AI-dependent groups if AI is disabled
+                                                const isFlatteningEnabled = enabledPlugins['enable_folder_flattening'] === true;
+                                                const isAiDependent = groupName === 'clustering' || groupName === 'weights';
+                                                const isNameGroup = groupName === 'name_grouping';
 
-                                        const plugins = params.filter(p => p.is_plugin);
-                                        const nonPlugins = params.filter(p => !p.is_plugin);
+                                                if (isAiDependent && !isAiEnabled) return null;
+                                                if (isNameGroup && isFlatteningEnabled) return null;
+
+                                                const plugins = params.filter(p => p.is_plugin);
+                                                const nonPlugins = params.filter(p => !p.is_plugin);
+
+                                                return (
+                                                    <div key={groupName}>
+                                                        <div className="text-[8px] font-bold text-slate-600 uppercase tracking-[0.3em] mb-3">{sectionLabels[groupName] || groupName}</div>
+                                                        {nonPlugins.length > 0 && (
+                                                            <div className="space-y-4 mb-4">
+                                                                {nonPlugins.map(p => {
+                                                                    if (p.key === 'flatten_rename' && !isFlatteningEnabled) return null;
+                                                                    return renderParamControl(p);
+                                                                })}
+                                                            </div>
+                                                        )}
+                                                        {plugins.length > 0 && (
+                                                            <div className="space-y-2 mb-4">
+                                                                {plugins.map(p => renderPluginCard(p))}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                );
+                                            });
+                                        })()}
+                                    </section>
+
+                                    {/* Workspace */}
+                                    <section>
+                                        <div className="flex items-center justify-between text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] mb-4">
+                                            <span>Workspace</span>
+                                            <i data-lucide="hard-drive" className="w-3 h-3 opacity-50"></i>
+                                        </div>
+                                        <div className="bg-slate-900/40 p-4 rounded-2xl border border-white/5 flex flex-col gap-4 shadow-inner">
+                                            <div className="flex items-center justify-between text-[9px] font-black uppercase tracking-widest">
+                                                <span className="text-slate-500">Virtual Mode</span>
+                                                <div className={`flex items-center gap-2 ${isVirtualMode ? 'text-amber-500' : 'text-slate-600'}`}>
+                                                    <span className="text-[8px]">{isVirtualMode ? 'ACTIVE' : 'OFF'}</span>
+                                                    <div className={`w-1.5 h-1.5 rounded-full ${isVirtualMode ? 'bg-amber-500 animate-pulse shadow-[0_0_5px_rgba(245,158,11,0.5)]' : 'bg-slate-700'}`}></div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </section>
+                                </div>
+                            ) : (
+                                <div className="pipeline-tree py-2">
+                                    <PipelineNode phase="Phase 01" title="Filter & Pre-sort" icon="filter">
+                                        {paramSchema.filter(p => p.key === 'enable_video_sorting').map(p => renderPluginCard(p))}
+                                    </PipelineNode>
+
+                                    <PipelineNode phase="Phase 02" title="Media Integrity" icon="shield-check">
+                                        <div className="grid gap-4">
+                                            {paramSchema.filter(p => p.key === 'enable_deduplication' || p.key === 'enable_video_deduplication').map(p => renderPluginCard(p))}
+                                        </div>
+                                    </PipelineNode>
+
+                                    {/* Phase 03: Organization Strategy */}
+                                    {(() => {
+                                        const isFlatten = enabledPlugins['enable_folder_flattening'];
+                                        const isAi = enabledPlugins['enable_ai_clustering'] !== false;
+                                        const strategy = isFlatten ? 'flatten' : (isAi ? 'ai' : 'off');
+
+                                        const setStrategy = (type) => {
+                                            setEnabledPlugins(prev => {
+                                                const next = { ...prev };
+                                                if (type === 'off') {
+                                                    next['enable_ai_clustering'] = false;
+                                                    next['enable_folder_flattening'] = false;
+                                                } else if (type === 'ai') {
+                                                    next['enable_ai_clustering'] = true;
+                                                    next['enable_folder_flattening'] = false;
+                                                } else if (type === 'flatten') {
+                                                    next['enable_ai_clustering'] = false;
+                                                    next['enable_folder_flattening'] = true;
+                                                }
+                                                return next;
+                                            });
+                                        };
 
                                         return (
-                                            <div key={groupName}>
-                                                <div className="text-[8px] font-bold text-slate-600 uppercase tracking-[0.3em] mb-3">{sectionLabels[groupName] || groupName}</div>
-                                                {nonPlugins.length > 0 && (
-                                                    <div className="space-y-4 mb-4">
-                                                        {nonPlugins.map(p => {
-                                                            if (p.key === 'flatten_rename' && !isFlatteningEnabled) return null;
-                                                            return renderParamControl(p);
-                                                        })}
-                                                    </div>
-                                                )}
-                                                {plugins.length > 0 && (
-                                                    <div className="space-y-2 mb-4">
-                                                        {plugins.map(p => renderPluginCard(p))}
-                                                    </div>
-                                                )}
-                                            </div>
-                                        );
-                                    });
-                                })()}
-                            </section>
+                                            <PipelineNode
+                                                phase="Phase 03"
+                                                title="Organization Strategy"
+                                                icon="layout-template"
+                                            >
+                                                <div className="bg-slate-900/40 p-1.5 rounded-xl border border-white/5 flex gap-1 mb-4 shadow-inner">
+                                                    {[
+                                                        { id: 'off', label: 'Off', icon: 'slash' },
+                                                        { id: 'ai', label: 'AI Engine', icon: 'brain' },
+                                                        { id: 'flatten', label: 'Flatten', icon: 'layers' }
+                                                    ].map(opt => (
+                                                        <button
+                                                            key={opt.id}
+                                                            onClick={() => setStrategy(opt.id)}
+                                                            className={`flex-1 py-2.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 ${strategy === opt.id ? 'bg-amber-500 text-white shadow-lg shadow-amber-500/10 active:scale-95' : 'text-slate-500 hover:text-slate-400 hover:bg-white/5'}`}
+                                                        >
+                                                            <i data-lucide={opt.icon} className="w-3.5 h-3.5"></i>
+                                                            {opt.label}
+                                                        </button>
+                                                    ))}
+                                                </div>
 
-                            {/* Workspace */}
-                            <section>
-                                <div className="flex items-center justify-between text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] mb-4">
-                                    <span>Workspace</span>
-                                    <i data-lucide="hard-drive" className="w-3 h-3 opacity-50"></i>
-                                </div>
-                                <div className="bg-slate-900/40 p-4 rounded-2xl border border-white/5 flex flex-col gap-4 shadow-inner">
-                                    <div className="flex items-center justify-between text-[9px] font-black uppercase tracking-widest">
-                                        <span className="text-slate-500">Virtual Mode</span>
-                                        <div className={`flex items-center gap-2 ${isVirtualMode ? 'text-amber-500' : 'text-slate-600'}`}>
-                                            <span className="text-[8px]">{isVirtualMode ? 'ACTIVE' : 'OFF'}</span>
-                                            <div className={`w-1.5 h-1.5 rounded-full ${isVirtualMode ? 'bg-amber-500 animate-pulse shadow-[0_0_5px_rgba(245,158,11,0.5)]' : 'bg-slate-700'}`}></div>
+                                                {strategy === 'ai' && (
+                                                    <div className="space-y-6 animate-in fade-in slide-in-from-top-2 duration-300">
+                                                        {paramSchema.filter(p => p.key === 'enable_color_features').map(p => renderPluginCard(p))}
+                                                        
+                                                        <div className="bg-white/5 p-4 rounded-xl border border-white/5 space-y-4">
+                                                            <div className="text-[8px] font-black text-amber-500/50 uppercase tracking-widest mb-2 px-1 flex items-center gap-2">
+                                                                <i data-lucide="cog" className="w-2.5 h-2.5"></i>
+                                                                AI Configuration
+                                                            </div>
+                                                            {paramSchema.filter(p => p.group === 'weights' && p.key !== 'enable_color_features' && p.key !== 'enable_ai_clustering').map(p => renderPluginCard(p))}
+                                                            <div className="h-px bg-white/5 my-4"></div>
+                                                            <div className="space-y-4">
+                                                                {paramSchema.filter(p => p.group === 'clustering').map(p => renderParamControl(p))}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {strategy === 'flatten' && (
+                                                    <div className="bg-white/5 p-4 rounded-xl border border-white/5 animate-in fade-in slide-in-from-top-2 duration-300">
+                                                        <div className="text-[8px] font-black text-amber-500/50 uppercase tracking-widest mb-4 px-1 flex items-center gap-2">
+                                                            <i data-lucide="layers" className="w-2.5 h-2.5"></i>
+                                                            Structural Override
+                                                        </div>
+                                                        {paramSchema.filter(p => p.key === 'flatten_rename').map(p => renderParamControl(p))}
+                                                    </div>
+                                                )}
+
+                                                {strategy === 'off' && (
+                                                    <div className="text-[9px] text-slate-600 italic px-2 flex items-center gap-2">
+                                                        <i data-lucide="info" className="w-3 h-3"></i>
+                                                        Files will follow existing hierarchy unless Pattern Matching is active.
+                                                    </div>
+                                                )}
+                                            </PipelineNode>
+                                        );
+                                    })()}
+
+                                    <PipelineNode
+                                        phase="Phase 04"
+                                        title="Context Attribution"
+                                        icon="file-search"
+                                        isDeactivated={enabledPlugins['enable_folder_flattening']}
+                                    >
+                                        <div className="grid gap-2">
+                                            {paramSchema.filter(p => p.group === 'name_grouping').map(p => renderPluginCard(p))}
                                         </div>
-                                    </div>
+                                    </PipelineNode>
+
+                                    <PipelineNode phase="Phase 05" title="Deployment Action" icon="truck">
+                                        <div className="bg-slate-900/40 p-4 rounded-xl border border-white/5">
+                                            {paramSchema.filter(p => p.key === 'action').map(p => renderParamControl(p))}
+                                        </div>
+                                    </PipelineNode>
                                 </div>
-                            </section>
+                            )}
                         </div>
 
                         {/* Summary Footer */}
@@ -1061,11 +1243,19 @@
 
                         {!isInventoryCollapsed ? (
                             <>
-                                <div className="p-4 border-b border-white/5 flex items-center justify-between">
-                                    <span className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-600">Inventory</span>
-                                    <div className="p-1 bg-amber-500/10 rounded flex items-center text-amber-500 text-[8px] font-bold">
-                                        {stats.clusters} NEW
+                                <div className="p-4 border-b border-white/5 space-y-2">
+                                    <div className="flex items-center justify-between">
+                                        <span className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-600">Inventory</span>
+                                        <div className="p-1 bg-amber-500/10 rounded flex items-center text-amber-500 text-[8px] font-bold">
+                                            {stats.clusters} NEW
+                                        </div>
                                     </div>
+                                    {logFilename && (
+                                        <div className="flex items-center gap-2 px-1 text-[9px] font-bold text-slate-500 truncate" title={logFilename}>
+                                            <i data-lucide="file-text" className="w-2.5 h-2.5 opacity-50"></i>
+                                            <span className="truncate">{logFilename}</span>
+                                        </div>
+                                    )}
                                 </div>
                                 <div className="flex-1 overflow-y-auto p-4 space-y-2 scrollbar-none">
                                     {clusterKeys.map(key => {

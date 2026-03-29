@@ -48,7 +48,7 @@ LOG_COLUMNS = [
     "Cluster_ID",
     "Media_Type",
     "Reason",
-    "Confidence",
+    "Match_Confidence",
     "Settings",
     "Near_Misses",
 ]
@@ -76,7 +76,7 @@ class FeatureCache:
     JSON-based cache for expensive file features (CLIP, color, etc).
     Stored as '.organizer_cache.json' in the root directory.
     """
-    CACHE_VERSION = "1.0"
+    CACHE_VERSION = "1.3"
 
     def __init__(self, root: Path):
         self.root = root
@@ -149,6 +149,14 @@ PARAM_SCHEMA = [
         "tooltip": "Generates MD5 checksums for every image to identify byte-for-byte identical files regardless of their filename.",
         "group": "core",
         "is_plugin": True, "plugin_icon": "zap",
+    },
+    {
+        "key": "enable_color_features", "cli": "--enable-color-features", "type": "bool",
+        "default": True,
+        "label": "Spatial Color Signature",
+        "tooltip": "Extracts a grid of color samples horizontally and vertically across the image. Excellent for grouping images by 'vibe', lighting, or overall composition.",
+        "group": "core",
+        "is_plugin": True, "plugin_icon": "palette",
     },
     {
         "key": "enable_folder_flattening", "cli": "--enable-folder-flattening", "type": "bool",
@@ -250,11 +258,25 @@ PARAM_SCHEMA = [
     },
     {
         "key": "color_weight", "cli": "--color-weight", "type": "float",
-        "default": 0.0, "min": 0.0, "max": 5.0, "step": 0.05,
-        "label": "Color Similarity Weight",
-        "tooltip": "Calculates global color histograms. Higher weights will group images based on their dominant color palettes.",
+        "default": 0.3, "min": 0.0, "max": 5.0, "step": 0.05,
+        "label": "Color Influence Weight",
+        "tooltip": "How much 'color' matters vs other AI factors. Increase this to group by 'vibe' over 'subject'.",
         "group": "weights",
         "is_plugin": True, "plugin_icon": "palette",
+    },
+    {
+        "key": "grid_detail", "cli": "--grid-detail", "type": "int",
+        "default": 16, "min": 4, "max": 64,
+        "label": "Color Grid Detail",
+        "tooltip": "The N×N grid size. 16 is the 'sweet spot' for patterns; 8 is better for broad lighting; 32+ for fine detail.",
+        "group": "clustering",
+    },
+    {
+        "key": "use_lab_space", "cli": "--use-lab-space", "type": "bool",
+        "default": True,
+        "label": "Use CIELAB Color Space",
+        "tooltip": "Converts Colors to CIELAB space to ensure mathematical distance matches human perceived difference.",
+        "group": "clustering",
     },
     {
         "key": "near_duplicate_weight", "cli": "--near-duplicate-weight", "type": "float",
@@ -288,6 +310,13 @@ PARAM_SCHEMA = [
         "group": "weights",
         "is_plugin": True, "plugin_icon": "eye",
     },
+    {
+        "key": "similarity_sensitivity", "cli": "--similarity-sensitivity", "type": "float",
+        "default": 0.95, "min": 0.0, "max": 1.0, "step": 0.01,
+        "label": "Similarity Sensitivity",
+        "tooltip": "VisiPics-style sensitivity slider. 1.0 = Only identical images. 0.0 = Very broad clusters. Maps to Epsilon: (1.0 - Sensitivity).",
+        "group": "clustering",
+    },
 ]
 
 # Build a quick lookup dict: key -> schema entry
@@ -296,6 +325,78 @@ _PARAM_MAP = {p["key"]: p for p in PARAM_SCHEMA}
 # ---------------------------------------------------------------------------
 # Utility helpers
 # ---------------------------------------------------------------------------
+
+
+class ColorVibeSorter:
+    """
+    Expert-level color feature extractor for visual similarity.
+    Provides a standardized CIELAB flattened grid with Euclidean-friendly normalization.
+    """
+    def __init__(self, grid_size: int = 16, use_lab: bool = True):
+        self.grid_size = grid_size
+        self.use_lab = use_lab
+
+    def get_features(self, image_path: Path) -> np.ndarray:
+        """
+        Main entry point for feature extraction. 
+        Returns a flattened vector normalized such that Max Euclidean Distance is 1.0.
+        """
+        from PIL import Image
+        try:
+            with Image.open(image_path) as img:
+                return self.process_image(img)
+        except Exception:
+            # Fallback for broken images
+            dim = 3 * (self.grid_size ** 2)
+            return np.zeros(dim)
+
+    def process_image(self, img_pil: Any) -> np.ndarray:
+        """Internal image processing logic."""
+        from PIL import Image
+        
+        # 1. Handle Transparency (Flatten to White)
+        if img_pil.mode in ("RGBA", "LA") or (img_pil.mode == "P" and "transparency" in img_pil.info):
+            alpha_img = img_pil.convert("RGBA")
+            background = Image.new("RGBA", alpha_img.size, (255, 255, 255, 255))
+            composite = Image.alpha_composite(background, alpha_img)
+            img_pil = composite.convert("RGB")
+        else:
+            img_pil = img_pil.convert("RGB")
+        
+        # 2. Downsample to Grid (Area averaging)
+        grid = img_pil.resize((self.grid_size, self.grid_size), resample=Image.Resampling.BOX)
+        
+        # 3. Convert to Array [0, 1]
+        arr = np.array(grid).astype(np.float32) / 255.0
+        
+        # 4. Color Space Conversion (CIELAB)
+        if self.use_lab:
+            try:
+                from skimage.color import rgb2lab
+                # rgb2lab returns L [0, 100], a,b [-128, 127]
+                lab = rgb2lab(arr)
+                
+                # Normalize individual elements to [0, 1]
+                lab[..., 0] /= 100.0
+                lab[..., 1:] = (lab[..., 1:] + 128.0) / 255.0
+                arr = lab
+            except ImportError:
+                pass
+        
+        # 5. Flatten and Factor-Normalize
+        # To ensure that Euclidean Distance (d) between any two vectors is in range [0, 1],
+        # we divide the vector by sqrt(dim).
+        # Proof: sqrt(sum(v1_i - v2_i)^2) <= sqrt(dim * 1^2) = sqrt(dim).
+        # Thus, V_norm = V / sqrt(dim) ensures d <= 1.0.
+        flat_vec = arr.flatten()
+        dim = flat_vec.shape[0]
+        return flat_vec / np.sqrt(dim)
+
+
+def extract_spatial_color_signature(img_pil: Any, grid_size: int = 16, use_lab: bool = True) -> np.ndarray:
+    """Legacy wrapper for backward compatibility."""
+    sorter = ColorVibeSorter(grid_size=grid_size, use_lab=use_lab)
+    return sorter.process_image(img_pil)
 
 
 def is_hidden(path: Path) -> bool:
@@ -483,7 +584,7 @@ def phase1_video_sorting(
                         "Cluster_ID": "duplicate",
                         "Media_Type": "video",
                         "Reason": f"Duplicate Video: Exact MD5 match ({h[:8]})",
-                        "Confidence": "1.0 (Bit-for-bit)",
+                        "Match_Confidence": "1.0 (Bit-for-bit)",
                     })
                     continue
                 else:
@@ -518,7 +619,7 @@ def phase1_video_sorting(
                     "Cluster_ID": f"video/{subfolder}",
                     "Media_Type": "video",
                     "Reason": reason,
-                    "Confidence": "1.0 (Geometry)",
+                    "Match_Confidence": "1.0 (Geometry)",
                 }
             )
         else:
@@ -582,7 +683,7 @@ def phase2_deduplication(
                     "Cluster_ID": "duplicate",
                     "Media_Type": "image",
                     "Reason": f"Duplicate: Exact MD5 match ({h[:8]})",
-                    "Confidence": "1.0 (Bit-for-bit)",
+                    "Match_Confidence": "1.0 (Bit-for-bit)",
                 }
             )
         else:
@@ -663,7 +764,7 @@ def phase2b_folder_flattening(
                 "Cluster_ID": "flattened",
                 "Media_Type": "image" if fpath.suffix.lower() in IMAGE_EXTENSIONS else "other",
                 "Reason": f"Flattened from subfolder: {rel_path}",
-                "Confidence": "1.0",
+                "Match_Confidence": "1.0",
             })
             
     log.info("Phase 2b complete: %d files flattened.", len(entries))
@@ -836,7 +937,7 @@ def phase3_standalone_grouping(
             "Cluster_ID": cluster_id,
             "Media_Type": "image",
             "Reason": reason,
-            "Confidence": "1.0000",
+            "Match_Confidence": "1.0000",
             "Near_Misses": "{}",
         })
 
@@ -867,6 +968,10 @@ def phase3_clustering(
     ai_clustering_mode: str = "individual",
     use_feature_cache: bool = True,
     hash_map: Optional[dict[str, str]] = None,
+    enable_color_features: bool = True,
+    grid_detail: int = 16,
+    use_lab_space: bool = True,
+    similarity_sensitivity: Optional[float] = None,
 ) -> tuple[list[dict], dict[int, list[Path]]]:
     """
     Generate CLIP embeddings + temporal features, cluster with HDBSCAN.
@@ -914,25 +1019,50 @@ def phase3_clustering(
             if cached:
                 # Use cached features
                 feat = np.array(cached["clip"])
-                c_feat = np.array(cached["color"])
                 h_feat = np.array(cached["vhash"])
+                
+                # Setting-Aware Color Cache: Only use if settings match
+                c_feat = None
+                if "color" in cached:
+                    c_grid = cached.get("color_grid_size")
+                    c_lab = cached.get("color_use_lab", True)
+                    if c_grid == grid_detail and c_lab == use_lab_space:
+                        c_feat = np.array(cached["color"])
+                    
+                if c_feat is None and (enable_color_features and color_weight > 0):
+                    # Cache miss for color specifically or settings changed
+                    img = Image.open(fpath)
+                    c_feat = extract_spatial_color_signature(img, grid_detail, use_lab_space)
+                    # Update cache entry in memory (will be saved later)
+                    cached["color"] = c_feat.tolist()
+                    cached["color_grid_size"] = grid_detail
+                    cached["color_use_lab"] = use_lab_space
+                elif c_feat is None:
+                    # Color disabled or weight 0, use dummy/empty
+                    c_feat = np.zeros(3 * (grid_detail**2))
             else:
                 # 3. Cache Miss: Extract via AI
-                if model is None:
-                    log.info("Cache miss. Loading CLIP model (ViT-B/32) on %s …", device)
-                    model, preprocess = clip.load("ViT-B/32", device=device)
+                img = Image.open(fpath)
+                
+                # --- CLIP Embedding ---
+                if visual_weight > 0:
+                    if model is None:
+                        log.info("Cache miss. Loading CLIP model (ViT-B/32) on %s …", device)
+                        model, preprocess = clip.load("ViT-B/32", device=device)
 
-                img = Image.open(fpath).convert("RGB")
-                tensor = preprocess(img).unsqueeze(0).to(device)
-                with torch.no_grad():
-                    feat_t = model.encode_image(tensor)
-                feat = feat_t.cpu().numpy().flatten()
-                feat = feat / (np.linalg.norm(feat) + 1e-10)  # L2 normalize
+                    tensor = preprocess(img.convert("RGB")).unsqueeze(0).to(device)
+                    with torch.no_grad():
+                        feat_t = model.encode_image(tensor)
+                    feat = feat_t.cpu().numpy().flatten()
+                    feat = feat / (np.linalg.norm(feat) + 1e-10)  # L2 normalize
+                else:
+                    feat = np.zeros(512)
 
-                # --- Color extraction (average RGB) ---
-                thumb_c = img.resize((1, 1))
-                c_feat = np.array(thumb_c.getpixel((0,0)), dtype=float)
-                c_feat /= (np.linalg.norm(c_feat) + 1e-10)
+                # --- Spatial Color Signature ---
+                if enable_color_features and color_weight > 0:
+                    c_feat = extract_spatial_color_signature(img, grid_detail, use_lab_space)
+                else:
+                    c_feat = np.zeros(3 * (grid_detail**2))
 
                 # --- Visual Hash (perceptual/structural) ---
                 thumb_h = img.resize((16, 16)).convert("L")
@@ -944,6 +1074,8 @@ def phase3_clustering(
                     fcache.set(fpath, md5, {
                         "clip": feat.tolist(),
                         "color": c_feat.tolist(),
+                        "color_grid_size": grid_detail,
+                        "color_use_lab": use_lab_space,
                         "vhash": h_feat.tolist(),
                     })
 
@@ -1028,6 +1160,12 @@ def phase3_clustering(
     # Normalize HDBSCAN params: 0 or False should be None (auto)
     if not min_samples:
         min_samples = None
+
+    # Map VisiPics-style Sensitivity Slider to Epsilon
+    # Formula: Distance_Threshold = (1.0 - Sensitivity)
+    if similarity_sensitivity is not None:
+        log.info("Mapping Sensitivity %.2f -> Epsilon %.2f", similarity_sensitivity, 1.0 - similarity_sensitivity)
+        cluster_selection_epsilon = 1.0 - similarity_sensitivity
 
     import hdbscan
 
@@ -1180,7 +1318,7 @@ def phase3_clustering(
                 "Cluster_ID": cluster_id,
                 "Media_Type": "image",
                 "Reason": reason,
-                "Confidence": f"{prob:.4f}",
+                "Match_Confidence": f"{prob:.4f}",
                 "Near_Misses": json.dumps(near_misses),
             }
         )
@@ -1449,6 +1587,12 @@ def _get_cluster_params() -> dict:
     except ValueError:
         eps = 0.0
 
+    raw_sens = _prompt("  Similarity Sensitivity [0.95]: ", "0.95")
+    try:
+        sens = float(raw_sens)
+    except ValueError:
+        sens = 0.95
+
     print("\n  Granularity Selection:")
     print("   [1]  🎯 Small & Accurate (Leaf) - finds more, tighter groups")
     print("   [2]  🌊 Large & Broad (EOM) - default grouping style")
@@ -1479,16 +1623,31 @@ def _get_cluster_params() -> dict:
     except ValueError:
         nw = 0.0
 
+    enable_color = _prompt("  Enable Spatial Color Signature? [Y/n]: ", "y").lower() == "y"
+    grid_size = 16
+    use_lab = True
+    if enable_color:
+        raw_gs = _prompt("  Color Grid Detail [16]: ", "16")
+        try:
+            grid_size = int(raw_gs)
+        except ValueError:
+            grid_size = 16
+        use_lab = _prompt("  Use CIELAB Color Space? [Y/n]: ", "y").lower() == "y"
+
     return {
         "min_cluster_size": min_size,
         "min_samples": min_samples,
         "epsilon": eps,
+        "similarity_sensitivity": sens,
         "method": method,
         "temporal_weight": tw,
         "filename_weight": fw,
         "color_weight": cw,
-        "near_duplicate_weight": ndw,
-        "ai_clustering_mode": mode
+        "near_duplicate_weight": nw,
+        "ai_clustering_mode": mode,
+        "enable_color_features": enable_color,
+        "grid_detail": grid_size,
+        "use_lab_space": use_lab
     }
 
 
@@ -1555,6 +1714,7 @@ def interactive_main() -> None:
                 min_samples=params["min_samples"],
                 cluster_selection_epsilon=params["epsilon"],
                 cluster_selection_method=params["method"],
+                similarity_sensitivity=params.get("similarity_sensitivity"),
                 temporal_weight=params["temporal_weight"],
                 filename_weight=params["filename_weight"],
                 color_weight=params["color_weight"],
@@ -1563,6 +1723,9 @@ def interactive_main() -> None:
                 ai_clustering_mode=params.get("ai_clustering_mode", "individual"),
                 use_feature_cache=True, # Default to True in interactive mode
                 hash_map=master_hash_map,
+                enable_color_features=params["enable_color_features"],
+                grid_detail=params["grid_detail"],
+                use_lab_space=params["use_lab_space"],
             )
             cluster_entries = clust_entries
             all_entries.extend(clust_entries)
@@ -1642,7 +1805,7 @@ def interactive_main() -> None:
             clust_entries = []
             if is_flat:
                 log.info("[SKIP] Phase 3: AI Clustering skipped due to Flattening.")
-            elif params.get("enable_ai_clustering", True):
+            elif params.get("enable_ai_clustering", True) or params.get("enable_color_features", True):
                 clust_entries, _ = phase3_clustering(
                     root, unique_images, dry_run,
                     action=action,
@@ -1650,6 +1813,7 @@ def interactive_main() -> None:
                     min_samples=params.get("min_samples"),
                     cluster_selection_epsilon=params.get("epsilon", 0.0),
                     cluster_selection_method=params.get("method", "leaf"),
+                    similarity_sensitivity=params.get("similarity_sensitivity"),
                     temporal_weight=params.get("temporal_weight", 0.3),
                     use_feature_cache=True,
                     hash_map=master_hash_map,
@@ -1657,6 +1821,9 @@ def interactive_main() -> None:
                     color_weight=params.get("color_weight", 0.0),
                     near_duplicate_weight=params.get("near_duplicate_weight", 0.0),
                     ai_clustering_mode=params.get("ai_clustering_mode", "individual"),
+                    enable_color_features=params.get("enable_color_features", True),
+                    grid_detail=params.get("grid_detail", 16),
+                    use_lab_space=params.get("use_lab_space", True),
                 )
             elif params.get("group_name_matches", False) or params.get("group_name_prefix", False):
                 log.info("[INFO] AI Clustering disabled, but Name Grouping is enabled. Running standalone.")
@@ -1857,7 +2024,7 @@ def main() -> None:
     if is_flattening:
         log.info("[SKIP] Phase 3 & 3b: Skipped due to Subfolder Flattening.")
         cluster_entries = []
-    elif _arg("enable_ai_clustering"):
+    elif _arg("enable_ai_clustering") or _arg("enable_color_features"):
         cluster_entries, cluster_map = phase3_clustering(
             root,
             unique_images,
@@ -1867,6 +2034,7 @@ def main() -> None:
             min_samples=_arg("min_samples"),
             cluster_selection_epsilon=_arg("epsilon"),
             cluster_selection_method=_arg("method"),
+            similarity_sensitivity=_arg("similarity_sensitivity"),
             temporal_weight=_arg("temporal_weight"),
             filename_weight=_arg("filename_weight"),
             color_weight=_arg("color_weight"),
@@ -1877,6 +2045,9 @@ def main() -> None:
             ai_clustering_mode=_arg("ai_clustering_mode"),
             use_feature_cache=_arg("use_feature_cache"),
             hash_map=master_hash_map,
+            enable_color_features=_arg("enable_color_features"),
+            grid_detail=_arg("grid_detail"),
+            use_lab_space=_arg("use_lab_space"),
         )
     elif _arg("group_name_matches") or _arg("group_name_prefix"):
         log.info("[INFO] AI Clustering disabled, but Name Grouping is enabled. Running standalone.")

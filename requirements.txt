@@ -6,3 +6,4 @@ hdbscan
 scikit-learn
 numpy
 tqdm
+scikit-image
