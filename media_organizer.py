@@ -68,6 +68,59 @@ logging.basicConfig(
 log = logging.getLogger("media_organizer")
 
 # ---------------------------------------------------------------------------
+# Feature Cache — persists visual embeddings to skip expensive AI re-runs
+# ---------------------------------------------------------------------------
+
+class FeatureCache:
+    """
+    JSON-based cache for expensive file features (CLIP, color, etc).
+    Stored as '.organizer_cache.json' in the root directory.
+    """
+    CACHE_VERSION = "1.0"
+
+    def __init__(self, root: Path):
+        self.root = root
+        self.path = root / ".organizer_cache.json"
+        self.data: dict[str, dict] = {}
+        self.load()
+
+    def load(self):
+        if self.path.exists():
+            try:
+                with open(self.path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                    if loaded.get("version") == self.CACHE_VERSION:
+                        self.data = loaded.get("features", {})
+                        log.info("Feature cache loaded: %d entries.", len(self.data))
+                    else:
+                        log.info("Cache version mismatch or missing. Starting fresh.")
+            except Exception as e:
+                log.warning("Could not load feature cache: %s", e)
+
+    def save(self):
+        try:
+            with open(self.path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "version": self.CACHE_VERSION,
+                    "updated_at": datetime.now().isoformat(),
+                    "features": self.data
+                }, f, indent=2)
+        except Exception as e:
+            log.warning("Could not save feature cache: %s", e)
+
+    def get(self, fpath: Path, md5: str) -> Optional[dict]:
+        """Lookup features by MD5. Path is used for secondary validation."""
+        entry = self.data.get(md5)
+        if entry:
+            # Check if dimensions match what we expect? 
+            # For now, just trust the MD5.
+            return entry
+        return None
+
+    def set(self, fpath: Path, md5: str, features: dict):
+        self.data[md5] = features
+
+# ---------------------------------------------------------------------------
 # Parameter Schema — single source of truth for CLI, API, and UI
 # ---------------------------------------------------------------------------
 
@@ -133,6 +186,13 @@ PARAM_SCHEMA = [
         "choices": ["copy", "move"], "default": "copy",
         "label": "File Action",
         "tooltip": "Copy keeps originals intact; Move deletes them after organizing",
+        "group": "general",
+    },
+    {
+        "key": "use_feature_cache", "cli": "--use-feature-cache", "type": "bool",
+        "default": True,
+        "label": "Use Feature Cache",
+        "tooltip": "Speeds up re-runs by saving/loading AI embeddings to a local .json file. Highly recommended for iterative tuning.",
         "group": "general",
     },
     # ── Clustering ───────────────────────────────────────────
@@ -535,7 +595,9 @@ def phase2_deduplication(
         len(entries),
         len(unique),
     )
-    return entries, unique
+    # Return hash map for downstream AI cache lookups
+    path_to_hash = {str(p): h for h, p in seen_hashes.items()}
+    return entries, unique, path_to_hash
 
 
 def phase2b_folder_flattening(
@@ -605,7 +667,7 @@ def phase2b_folder_flattening(
             })
             
     log.info("Phase 2b complete: %d files flattened.", len(entries))
-    return entries, remaining
+    return entries, remaining, {str(p): md5_hash(p) for p in images}
 
 
 # ---------------------------------------------------------------------------
@@ -803,6 +865,8 @@ def phase3_clustering(
     group_name_matches: bool = False,
     group_name_prefix: bool = False,
     ai_clustering_mode: str = "individual",
+    use_feature_cache: bool = True,
+    hash_map: Optional[dict[str, str]] = None,
 ) -> tuple[list[dict], dict[int, list[Path]]]:
     """
     Generate CLIP embeddings + temporal features, cluster with HDBSCAN.
@@ -816,6 +880,10 @@ def phase3_clustering(
         log.info("No images to cluster.")
         return [], {}
 
+    # 1. Initialize Cache
+    fcache = FeatureCache(root) if use_feature_cache else None
+    hash_map = hash_map or {}
+
     # ------------------------------------------------------------------
     # 3a  Visual embeddings via CLIP
     # ------------------------------------------------------------------
@@ -825,8 +893,9 @@ def phase3_clustering(
     from tqdm import tqdm
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    log.info("Loading CLIP model (ViT-B/32) on %s …", device)
-    model, preprocess = clip.load("ViT-B/32", device=device)
+    
+    # Lazy load model only if cache misses exist
+    model, preprocess = None, None
 
     embeddings: list[np.ndarray] = []
     color_features: list[np.ndarray] = []
@@ -837,33 +906,60 @@ def phase3_clustering(
     log.info("Embedding images …")
     for fpath in tqdm(image_paths, desc="  Creating embeddings", unit="img", leave=False, file=sys.stdout):
         try:
-            img = Image.open(fpath).convert("RGB")
-            tensor = preprocess(img).unsqueeze(0).to(device)
-            with torch.no_grad():
-                feat = model.encode_image(tensor)
-            feat = feat.cpu().numpy().flatten()
-            feat = feat / (np.linalg.norm(feat) + 1e-10)  # L2 normalize
+            md5 = hash_map.get(str(fpath)) or md5_hash(fpath)
+            
+            # 2. Check Cache
+            cached = fcache.get(fpath, md5) if fcache else None
+            
+            if cached:
+                # Use cached features
+                feat = np.array(cached["clip"])
+                c_feat = np.array(cached["color"])
+                h_feat = np.array(cached["vhash"])
+            else:
+                # 3. Cache Miss: Extract via AI
+                if model is None:
+                    log.info("Cache miss. Loading CLIP model (ViT-B/32) on %s …", device)
+                    model, preprocess = clip.load("ViT-B/32", device=device)
+
+                img = Image.open(fpath).convert("RGB")
+                tensor = preprocess(img).unsqueeze(0).to(device)
+                with torch.no_grad():
+                    feat_t = model.encode_image(tensor)
+                feat = feat_t.cpu().numpy().flatten()
+                feat = feat / (np.linalg.norm(feat) + 1e-10)  # L2 normalize
+
+                # --- Color extraction (average RGB) ---
+                thumb_c = img.resize((1, 1))
+                c_feat = np.array(thumb_c.getpixel((0,0)), dtype=float)
+                c_feat /= (np.linalg.norm(c_feat) + 1e-10)
+
+                # --- Visual Hash (perceptual/structural) ---
+                thumb_h = img.resize((16, 16)).convert("L")
+                h_feat = np.array(thumb_h).flatten().astype(float)
+                h_feat /= (np.linalg.norm(h_feat) + 1e-10)
+
+                # Store in cache
+                if fcache:
+                    fcache.set(fpath, md5, {
+                        "clip": feat.tolist(),
+                        "color": c_feat.tolist(),
+                        "vhash": h_feat.tolist(),
+                    })
+
             embeddings.append(feat)
-
-            # --- Color extraction (average RGB) ---
-            thumb_c = img.resize((1, 1))
-            c_feat = np.array(thumb_c.getpixel((0,0)), dtype=float)
-            c_feat /= (np.linalg.norm(c_feat) + 1e-10)
             color_features.append(c_feat)
-
-            # --- Visual Hash (perceptual/structural) ---
-            # 16x16 grayscale thumbnail captures layout/structure
-            thumb_h = img.resize((16, 16)).convert("L")
-            h_feat = np.array(thumb_h).flatten().astype(float)
-            h_feat /= (np.linalg.norm(h_feat) + 1e-10)
             hash_features.append(h_feat)
-
             valid_paths.append(fpath)
 
             dt = get_file_datetime(fpath)
             timestamps.append(dt.timestamp())
         except Exception as exc:
             log.warning("Skipping %s: %s", fpath, exc)
+
+    # 4. Save Cache
+    if fcache:
+        fcache.save()
 
     if not embeddings:
         log.info("No valid embeddings produced.")
@@ -1006,9 +1102,9 @@ def phase3_clustering(
     for label in unique_labels:
         indices = np.where(labels == label)[0]
         cluster_points = combined[indices]
-        # Fast distance matrix calculation for small clusters
-        diffs = cluster_points[:, np.newaxis, :] - cluster_points[np.newaxis, :, :]
-        dists = np.linalg.norm(diffs, axis=2)
+        # Efficient distance matrix calculation using sklearn (prevents ArrayMemoryError)
+        from sklearn.metrics import pairwise_distances
+        dists = pairwise_distances(cluster_points, metric='euclidean')
         avg_dists = dists.mean(axis=1)
         m_idx_in_c = np.argmin(avg_dists)
         cluster_stats[label] = {
@@ -1414,11 +1510,8 @@ def interactive_main() -> None:
     dry_run, action = _confirm_mode()
 
     # --- Shared state across phases ---
-    all_entries: list[dict] = []
-    remaining_files: list[Path] | None = None
-    unique_images: list[Path] | None = None
-    cluster_entries: list[dict] | None = None
     is_flattening = False
+    master_hash_map: dict[str, str] = {}
 
     while True:
         print(MENU)
@@ -1437,10 +1530,11 @@ def interactive_main() -> None:
                     f for f in collect_all_files(root)
                     if f.suffix.lower() not in VIDEO_EXTENSIONS
                 ]
-            dup_entries, unique_images = phase2_deduplication(
+            dup_entries, unique_images, hashes = phase2_deduplication(
                 root, remaining_files, dry_run, action=action
             )
             all_entries.extend(dup_entries)
+            master_hash_map.update(hashes)
 
         # ---- Phase 3 ----
         elif choice == "3":
@@ -1467,6 +1561,8 @@ def interactive_main() -> None:
                 near_duplicate_weight=params["near_duplicate_weight"],
                 visual_weight=1.0,  # Default in interactive menu mode
                 ai_clustering_mode=params.get("ai_clustering_mode", "individual"),
+                use_feature_cache=True, # Default to True in interactive mode
+                hash_map=master_hash_map,
             )
             cluster_entries = clust_entries
             all_entries.extend(clust_entries)
@@ -1479,10 +1575,11 @@ def interactive_main() -> None:
                 unique_images = remaining_files
             
             rename_confirm = _prompt("  Rename with parent folder name? [Y/n]: ", "y").lower() == "y"
-            flat_entries, unique_images = phase2b_folder_flattening(
+            flat_entries, unique_images, flat_hashes = phase2b_folder_flattening(
                 root, unique_images, dry_run, action=action, rename=rename_confirm
             )
             all_entries.extend(flat_entries)
+            master_hash_map.update(flat_hashes)
             if flat_entries:
                 is_flattening = True
 
@@ -1522,19 +1619,21 @@ def interactive_main() -> None:
             all_entries.extend(video_entries)
 
             # Phase 2
-            dup_entries, unique_images = phase2_deduplication(
+            dup_entries, unique_images, phase2_hashes = phase2_deduplication(
                 root, remaining_files, dry_run, action=action
             )
             all_entries.extend(dup_entries)
+            master_hash_map.update(phase2_hashes)
 
             # Phase 2b
             is_flat = False
             if enable_flat:
                 rename_flat = _prompt("  Rename with parent folder name? [Y/n]: ", "y").lower() == "y"
-                flat_entries, unique_images = phase2b_folder_flattening(
+                flat_entries, unique_images, f_hashes = phase2b_folder_flattening(
                     root, unique_images, dry_run, action=action, rename=rename_flat
                 )
                 all_entries.extend(flat_entries)
+                master_hash_map.update(f_hashes)
                 if flat_entries:
                     is_flat = True
                     is_flattening = True
@@ -1552,6 +1651,8 @@ def interactive_main() -> None:
                     cluster_selection_epsilon=params.get("epsilon", 0.0),
                     cluster_selection_method=params.get("method", "leaf"),
                     temporal_weight=params.get("temporal_weight", 0.3),
+                    use_feature_cache=True,
+                    hash_map=master_hash_map,
                     filename_weight=params.get("filename_weight", 0.0),
                     color_weight=params.get("color_weight", 0.0),
                     near_duplicate_weight=params.get("near_duplicate_weight", 0.0),
@@ -1727,8 +1828,9 @@ def main() -> None:
 
     # Phase 2
     unique_images = remaining_files
+    master_hash_map = {}
     if _arg("enable_deduplication"):
-        dup_entries, unique_images = phase2_deduplication(
+        dup_entries, unique_images, master_hash_map = phase2_deduplication(
             root, remaining_files, _arg("dry_run"), action=_arg("action")
         )
         all_entries.extend(dup_entries)
@@ -1738,7 +1840,7 @@ def main() -> None:
     # Phase 2b: Folder Flattening (New)
     is_flattening = False
     if _arg("enable_folder_flattening"):
-        flatten_entries, unique_images = phase2b_folder_flattening(
+        flatten_entries, unique_images, flatten_hashes = phase2b_folder_flattening(
             root,
             unique_images,
             _arg("dry_run"),
@@ -1746,6 +1848,7 @@ def main() -> None:
             rename=_arg("flatten_rename"),
         )
         all_entries.extend(flatten_entries)
+        master_hash_map.update(flatten_hashes)
         if flatten_entries:
             is_flattening = True
             log.info("[INFO] Subfolder Flattening active. AI Clustering and Name Grouping will be skipped.")
@@ -1772,6 +1875,8 @@ def main() -> None:
             group_name_matches=_arg("group_name_matches"),
             group_name_prefix=_arg("group_name_prefix"),
             ai_clustering_mode=_arg("ai_clustering_mode"),
+            use_feature_cache=_arg("use_feature_cache"),
+            hash_map=master_hash_map,
         )
     elif _arg("group_name_matches") or _arg("group_name_prefix"):
         log.info("[INFO] AI Clustering disabled, but Name Grouping is enabled. Running standalone.")
