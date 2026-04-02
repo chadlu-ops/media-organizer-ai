@@ -1,4 +1,4 @@
-# Media Organizer AI 🧠📸
+# Media Organizer AI 🧠📸 — v0.3.0 (Commit from Log Update)
 
 A sophisticated, content-aware media management suite that uses CLIP embeddings, Perceptual Hashing, and HDBSCAN clustering to recursively organize massive image and video collections.
 
@@ -16,7 +16,7 @@ The tool operates in a strictly ordered pipeline to ensure maximum data integrit
 
 ---
 
-## 🎥 Perceptual Video Deduplication
+## 🎥 Perceptual Video Deduplication 
 
 The Media Organizer now features a robust perceptual deduplication engine for videos. This goes beyond simple file-size or binary matching.
 
@@ -36,7 +36,10 @@ The Media Organizer now features a robust perceptual deduplication engine for vi
 
 ### 2. Phase 02: Binary De-duplication
 - **Logic**: Performs a rapid MD5 byte-by-byte hash of every file.
-- **Result**: Identifies exact bit-for-bit duplicates. The first copy is kept; all others are moved to a `duplicates/` directory.
+- **Deduplication Strategy**: 
+    - **Alphabetical (Legacy)**: The first file A-Z is kept as the original.
+    - **Path Depth (Context-Rich)**: Files in deeper subfolders are prioritized as originals. This prevents "stranding" a file in a generic root folder when a more descriptive version exists.
+- **Result**: Identifies exact bit-for-bit duplicates. The "Original" is kept; all others are moved to a `duplicates/` directory.
 - **Benefit**: Immediate storage reduction and noise cleanup before AI processing.
 
 ### 3. Phase 03: AI & Spatiotemporal Clustering
@@ -49,8 +52,10 @@ The Media Organizer now features a robust perceptual deduplication engine for vi
 
 ### 4. Phase 04: Contextual Naming & Attribution
 - **Logic**: Assigns meaningful names based on the original source folder's name.
+- **Smart Flattening**: If enabled, the system uses **Name Sequencing** patterns (like `Vacation_001`, `Vacation_002`) to unify related files even if AI clustering is disabled.
+- **Heuristic Sensitivity**: Users can tune the `Min Group Items` and `Name Pattern Sensitivity` to control how strictly the system matches sequential filename patterns.
 - **Result**: Renames files using a sequential but descriptive schema: `[OriginalParentName]_[Counter].jpg`.
-- **Conflict Prevention**: Uses path-based hashing to ensure no two files ever collide, even if they share the same parent name.
+- **Conflict Prevention**: Uses path-based hashing to ensure no two files ever collide.
 
 ### 5. Phase 05: Audit & Logging
 - **Logic**: Records every single file movement into a CSV database.
@@ -58,9 +63,37 @@ The Media Organizer now features a robust perceptual deduplication engine for vi
 
 ---
 
+## ⚡ Commit from Log — Zero-Rescan Execution
+
+After running a simulation (dry-run), you can **commit the results directly** without re-running the entire AI pipeline.
+
+### How it Works:
+1. **Simulate** your organization with a dry-run.
+2. **Review** the results in the Visualizer dashboard.
+3. **Commit** by clicking "Execute Log" — the engine reads the CSV, validates each file's MD5 hash, and performs the move/copy operations.
+
+### Safety Features:
+- **MD5 Integrity Gate**: Every file is hash-verified before it is moved. Modified or deleted files are automatically skipped.
+- **Status Tracking**: Each entry in the committed log is tagged with `[COMMITTED]`, `[SKIPPED:MISSING]`, `[SKIPPED:HASH_MISMATCH]`, or `[SKIPPED:EXISTS]`.
+- **Pre-flight Check**: The dashboard shows a confirmation modal with operation count and action mode before executing.
+
+### CLI Usage:
+```bash
+# Step 1: Simulate
+python media_organizer.py --root "E:/My/Media" --dry-run --enable-deduplication
+
+# Step 2: Commit the simulation log
+python media_organizer.py --commit-log logs/My_Media_04.02.2026_15.30.csv
+```
+
+---
+
 ## 🎛️ AI Fine-Tuning Guide
 
 Fine-tuning is the key to mastering your organization. Use the **Tuning Lab** in the Visualizer to experiment.
+
+- **v0.2.2**: "Smart Deployment Update" — Added Literal Root organization, Flat Layout toggle, and UI Structure Preview icons. Fixed root-file flattening discrepancies.
+- **v0.2.1**: "Sensitivity Update" — Connected Tuning Lab sliders to the backend. Added Jaccard similarity and Min-Cluster-Size overrides.
 
 ### 🏠 Clustering Strategy
 - **Individual Mode**: Every image is judged on its own. Best for messy, mixed-source directories.
@@ -136,9 +169,19 @@ python media_organizer.py --root "E:/My/Media" --dry-run
 
 ### Navigating the Visualizer (Web UI)
 1. Run `python visualize_helper.py`.
-2. Open `index.html` in your browser.
-3. Use the **Tuning Lab** to adjust parameters and click **"Simulate Scan"** to preview groups instantly.
-4. Use **"Cloud Explorer"** to fly through your data clusters in a force-directed graph.
+2. Open `http://localhost:8000/visualizer.html` in your browser.
+3. Use the **Tuning Lab** to adjust parameters:
+    - **Quick Actions**: The [Simulate][Force Scan] / [Execute Log][Cleanup] grid provides rapid access to the most common tasks.
+    - **Tooltips**: Hover over the `(i)` info icon next to the "Source Folder" for context-sensitive help.
+4. Click **"Simulate Scan"** to preview groups instantly.
+5. Load a simulation log and click **"Execute Log"** to commit without re-scanning.
+6. Use **"Cloud Explorer"** to fly through your data clusters in a force-directed graph.
+
+---
+
+## 📅 Versioning & Patch History
+See [Patch Notes.md](file:///e:/image%20sorter/Patch%20Notes.md) for a detailed history of changes, including the v0.2.0 UI Overhaul and the v0.1.0 Perceptual Video Deduplication system.
+
 
 ---
 
@@ -147,3 +190,6 @@ python media_organizer.py --root "E:/My/Media" --dry-run
 
 > [!WARNING]
 > **Legacy Logs:** The UI has been updated to use `Match_Confidence`. Log files generated before March 29th, 2026, may show "N/A" for confidence scores until a fresh organized pass is performed.
+
+> [!NOTE]
+> **Commit from Log:** You can now skip the full AI pipeline entirely. Run a dry-run, review in the Visualizer, then click "Execute Log" or use `--commit-log` from the CLI to commit instantly with MD5 verification.

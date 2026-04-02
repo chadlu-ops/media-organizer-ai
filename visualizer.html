@@ -101,7 +101,23 @@
     <div id="root"></div>
 
     <script type="text/babel">
-        const { useState, useEffect, useMemo, useCallback } = React;
+        const { useState, useEffect, useMemo, useCallback, useRef } = React;
+
+        const LucideIcon = ({ name, className }) => {
+            const iconRef = useRef(null);
+            useEffect(() => {
+                if (iconRef.current && window.lucide) {
+                    // Update the inner <i> tag
+                    iconRef.current.innerHTML = `<i data-lucide="${name}" class="${className}"></i>`;
+                    // Only process this specific root
+                    lucide.createIcons({
+                        root: iconRef.current
+                    });
+                }
+            }, [name, className]);
+            // inline-flex ensures the span shrinks to the icon size
+            return <span ref={iconRef} className="inline-flex items-center justify-center"></span>;
+        };
 
         const MediaCard = ({ item, getImageUrl, onImageClick }) => {
             const [hasError, setHasError] = useState(false);
@@ -142,7 +158,7 @@
                                     />
                                 ) : (
                                     <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center bg-slate-900">
-                                        <i data-lucide="alert-octagon" className="w-8 h-8 text-slate-700 mb-2"></i>
+                                        <LucideIcon name="alert-octagon" className="w-8 h-8 text-slate-700 mb-2" />
                                         <span className="text-[9px] font-bold text-slate-600 leading-tight">MEDIA_LINK_ERROR</span>
                                     </div>
                                 )}
@@ -150,7 +166,7 @@
                         ) : (
                             <div className="w-full h-full flex flex-col items-center justify-center gap-3 bg-slate-900">
                                 <div className="w-16 h-16 rounded-full bg-amber-500/10 flex items-center justify-center text-amber-500 shadow-inner">
-                                    <i data-lucide="video" className="w-8 h-8"></i>
+                                    <LucideIcon name="video" className="w-8 h-8" />
                                 </div>
                                 <span className="text-[10px] font-black uppercase tracking-widest text-slate-600">Video Media</span>
                             </div>
@@ -159,14 +175,16 @@
                         {/* Overlay Stats */}
                         <div className="absolute inset-x-0 bottom-0 p-4 bg-gradient-to-t from-black/80 to-transparent opacity-0 group-hover:opacity-100 transition-opacity">
                             <div className="flex justify-between items-center text-[9px] font-bold uppercase text-white/60">
-                                <span>CRC32 Check</span>
-                                <span className="text-amber-500 font-mono">{item.Hash ? item.Hash.substring(0, 8) : 'NONE'}</span>
+                                <span className="shrink-0">{item.Match_Source ? 'Matched To' : 'CRC32 Check'}</span>
+                                <span className="text-amber-500 font-mono truncate ml-2 text-right flex-1" title={item.Match_Source || item.Hash || 'NONE'}>
+                                    {item.Match_Source || (item.Hash ? item.Hash.substring(0, 8) : 'NONE')}
+                                </span>
                             </div>
                             <button
                                 onClick={openExplorer}
                                 className="mt-2 w-full py-2 bg-amber-500 text-black rounded-xl text-[8px] font-black uppercase tracking-widest hover:bg-white transition-colors flex items-center justify-center gap-1"
                             >
-                                <i data-lucide="cloud" className="w-3 h-3"></i>
+                                <LucideIcon name="cloud" className="w-3 h-3" />
                                 Explore Cloud
                             </button>
                         </div>
@@ -185,7 +203,7 @@
                     <div className="pipeline-connector"></div>
                     <div className="flex gap-4 relative">
                         <div className={`pipeline-dot w-10 h-10 rounded-xl flex items-center justify-center shrink-0 shadow-lg transition-all ${isActive && !isDeactivated ? 'bg-amber-500 text-white shadow-amber-500/20' : 'bg-slate-800 text-slate-500'}`}>
-                            <i data-lucide={icon} className="w-5 h-5"></i>
+                            <LucideIcon name={icon} className="w-5 h-5" />
                         </div>
                         <div className="flex-1 pt-1">
                             <div className="flex items-center gap-3 mb-4">
@@ -202,20 +220,107 @@
             );
         };
 
+        const DedupeRow = ({ original, duplicates, getImageUrl, onImageClick }) => {
+            return (
+                <div className="group bg-slate-900/30 rounded-3xl border border-white/5 p-6 hover:bg-slate-900/50 hover:border-amber-500/20 transition-all duration-500 mb-4 overflow-hidden shadow-2xl backdrop-blur-md">
+                    <div className="flex gap-8">
+                        {/* Master Source (The "Kept" image) */}
+                        <div className="flex-shrink-0 w-80 space-y-3">
+                            <div className="flex items-center justify-between px-2">
+                                <div className="flex items-center gap-2">
+                                    <div className="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]"></div>
+                                    <span className="text-[10px] font-black text-emerald-500 uppercase tracking-widest">MASTER SOURCE</span>
+                                </div>
+                                <span className="text-[9px] font-bold text-slate-500 uppercase tracking-tighter italic">KEPT ORIGINAL</span>
+                            </div>
+                            
+                            <div className="relative group/master cursor-pointer overflow-hidden rounded-2xl shadow-2xl border-2 border-emerald-500/10 hover:border-emerald-500/40 transition-all"
+                                 onClick={() => original && onImageClick(original)}>
+                                {original ? (
+                                    <img 
+                                        src={getImageUrl(original)} 
+                                        className="w-full aspect-[4/3] object-cover transition-transform duration-700 group-hover/master:scale-110" 
+                                    />
+                                ) : (
+                                    <div className="w-full aspect-[4/3] bg-slate-950 flex flex-col items-center justify-center border border-dashed border-white/10">
+                                        <LucideIcon name="image-off" className="w-8 h-8 text-slate-800 mb-2" />
+                                        <div className="text-[10px] font-black text-slate-700 uppercase tracking-widest">Original Reference</div>
+                                        <div className="text-[8px] text-slate-800 italic mt-1 text-center px-4">(Moved in previous session or separate run)</div>
+                                    </div>
+                                )}
+                                <div className="absolute top-3 left-3 bg-emerald-500 text-black px-3 py-1 rounded-full text-[9px] font-black shadow-xl">KEEP</div>
+                            </div>
+                            <div className="px-2">
+                                <div className="text-[10px] font-bold text-white truncate mb-1">
+                                    {original ? (original.New_Filename || original.Filename) : "MATCH SOURCE"}
+                                </div>
+                                <div className="text-[9px] text-slate-500 truncate font-mono uppercase tracking-tighter">
+                                    {original ? (original.Cluster_ID || "Original") : "Cross-referenced Match"}
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="w-[1px] bg-gradient-to-b from-white/10 via-white/5 to-transparent self-stretch"></div>
+
+                        {/* Duplicates (Horizontal Scroll) */}
+                        <div className="flex-1 min-w-0 flex flex-col space-y-3">
+                            <div className="flex items-center justify-between px-2">
+                                <div className="flex items-center gap-2">
+                                    <div className="w-2 h-2 rounded-full bg-rose-500 shadow-[0_0_8px_rgba(244,63,94,0.5)]"></div>
+                                    <span className="text-[10px] font-black text-rose-500 uppercase tracking-widest">REDUNDANT COPIES</span>
+                                </div>
+                                <span className="text-[9px] font-bold text-slate-500 tracking-widest uppercase">{duplicates.length} MATCHES</span>
+                            </div>
+
+                            <div className="flex-1 flex gap-4 overflow-x-auto pb-4 scrollbar-thin scrollbar-thumb-white/5 hover:scrollbar-thumb-amber-500/20 snap-x">
+                                {duplicates.map((item, idx) => (
+                                    <div 
+                                        key={idx} 
+                                        className="snap-start flex-shrink-0 w-64 group/card relative pt-2"
+                                        onClick={() => onImageClick(item)}
+                                    >
+                                        <div className="relative cursor-pointer overflow-hidden rounded-xl border border-white/5 group-hover/card:border-rose-500/30 transition-all shadow-xl bg-slate-950">
+                                            <img 
+                                                src={getImageUrl(item)} 
+                                                className="w-full aspect-[4/3] object-cover transition-transform duration-700 group-hover/card:scale-105 opacity-80 group-hover/card:opacity-100" 
+                                            />
+                                            <div className="absolute top-2 left-2 bg-rose-500 text-white px-2 py-0.5 rounded-lg text-[8px] font-black shadow-lg">DUP</div>
+                                            <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent opacity-0 group-hover/card:opacity-100 transition-opacity flex items-end p-3">
+                                                <div className="text-[8px] font-black text-rose-400 uppercase tracking-widest">REDUNDANT MATCH</div>
+                                            </div>
+                                        </div>
+                                        <div className="mt-2 px-1">
+                                            <div className="text-[9px] font-bold text-slate-400 truncate mb-0.5">
+                                                {item.New_Filename || item.Filename}
+                                            </div>
+                                            <div className="text-[8px] text-slate-600 truncate uppercase tracking-tighter">
+                                                SCORE: {item.Match_Confidence || "Exact"}
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
         function App() {
             const [data, setData] = useState([]);
             const [organizedPath, setOrganizedPath] = useState(localStorage.getItem("organizedRoot") || "");
             const [backendRoot, setBackendRoot] = useState("");
+            const [isRunning, setIsRunning] = useState(false);
             const [isRootSyncing, setIsRootSyncing] = useState(false);
             const [isVirtualMode, setIsVirtualMode] = useState(false);
             const [selectedCluster, setSelectedCluster] = useState(null);
-            const [gridSize, setGridSize] = useState(4);
+            const [duplicateViewMode, setDuplicateViewMode] = useState('rows'); // 'grid' or 'rows'
+            const [gridSize, setGridSize] = useState(6);
+            const [lightboxItem, setLightboxItem] = useState(null);
             const [serverUrl, setServerUrl] = useState("http://localhost:8000");
             const [serverStatus, setServerStatus] = useState("unknown");
             const [settings, setSettings] = useState(null);
-            const [isRunning, setIsRunning] = useState(false);
             const [progressLog, setProgressLog] = useState([]);
-            const [lightboxItem, setLightboxItem] = useState(null);
             const [showPathPrompt, setShowPathPrompt] = useState(false);
             const [showDiagPathPrompt, setShowDiagPathPrompt] = useState(false);
             const [diagPath, setDiagPath] = useState("");
@@ -227,7 +332,58 @@
             const [isFetchingLog, setIsFetchingLog] = useState(false);
             const [isMenuOpen, setIsMenuOpen] = useState(false);
             const [tuningTab, setTuningTab] = useState('params'); // 'params' | 'pipeline'
+            const [isCleaning, setIsCleaning] = useState(false);
             const [logFilename, setLogFilename] = useState("");
+            const [showCommitConfirm, setShowCommitConfirm] = useState(false);
+
+            const groups = useMemo(() => {
+                const g = {};
+                data.forEach(item => {
+                    const c = item.Cluster_ID || "unsorted";
+                    if (!g[c]) g[c] = [];
+                    g[c].push(item);
+                });
+                return g;
+            }, [data]);
+
+            // Memoize grouped duplicates for VisiPics-style view
+            const groupedDuplicates = useMemo(() => {
+                if (selectedCluster !== 'duplicate') return [];
+                
+                const clusterItems = groups[selectedCluster] || [];
+                const groupsMap = {};
+
+                clusterItems.forEach(item => {
+                    // Try to find the "Kept" source
+                    let sourceKey = item.Match_Source;
+                    
+                    // Fallback for older logs: extract hash from Reason string "Duplicate: Exact MD5 match (hash)"
+                    if (!sourceKey && item.Reason) {
+                        const match = item.Reason.match(/\((.*?)\)/);
+                        if (match) sourceKey = `Hash: ${match[1]}`;
+                    }
+                    
+                    if (!sourceKey) sourceKey = "Unknown Source";
+                    
+                    if (!groupsMap[sourceKey]) groupsMap[sourceKey] = [];
+                    groupsMap[sourceKey].push(item);
+                });
+
+                return Object.entries(groupsMap).map(([sourceKey, items]) => {
+                    // Attempt to find the actual original item in the full dataset
+                    const original = data.find(d => 
+                        (d.New_Filename === sourceKey) || 
+                        (d.Filename === sourceKey) ||
+                        (d.Reason && d.Reason.includes(sourceKey.replace("Hash: ", "")))
+                    );
+                    
+                    return {
+                        sourceKey,
+                        original,
+                        duplicates: items
+                    };
+                });
+            }, [selectedCluster, groups, data]);
 
             // Lightbox navigation helpers
             const lightboxNav = useCallback((direction) => {
@@ -313,6 +469,30 @@
                 return () => clearInterval(interval);
             }, [serverUrl]);
 
+            const updateBackendRoot = async (path) => {
+                if (!path) return;
+                setIsRootSyncing(true);
+                try {
+                    const res = await fetch(`${serverUrl}/api/set_root`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ path: path.replace(/\\/g, "/") })
+                    });
+                    const result = await res.json();
+                    if (res.ok) {
+                        localStorage.setItem("organizedRoot", path);
+                        setBackendRoot(result.new_root || path);
+                        setOrganizedPath(result.new_root || path);
+                    } else {
+                        alert("Error setting root: " + (result.error || "Unknown error"));
+                    }
+                } catch (e) {
+                    console.error("Failed to update root", e);
+                } finally {
+                    setIsRootSyncing(false);
+                }
+            };
+
             // Sync root path with backend on load if found in localStorage
             useEffect(() => {
                 if (organizedPath) updateBackendRoot(organizedPath);
@@ -379,14 +559,7 @@
             }, [aiParams.ai_clustering_mode, prevMode, paramSchema]);
 
             // React-safe Lucide initialization
-            useEffect(() => {
-                const timeout = setTimeout(() => {
-                    if (window.lucide) {
-                        lucide.createIcons();
-                    }
-                }, 100);
-                return () => clearTimeout(timeout);
-            }, [data, selectedCluster, isMenuOpen, isConsoleExpanded, isTuningCollapsed, isInventoryCollapsed, lightboxItem, diagResult]);
+            // No global createIcons needed as icons are handled by LucideIcon component
 
             // Toggle a plugin on/off with mutual exclusivity logic
             const togglePlugin = (key) => {
@@ -415,15 +588,23 @@
                 const update = (v) => setAiParams(prev => ({ ...prev, [p.key]: v }));
 
                 if (p.type === 'bool' && !p.is_plugin) {
+                    const isForcedOrg = p.key === 'use_organized_subfolder' && aiParams.action === 'copy';
+                    const displayVal = isForcedOrg ? true : !!val;
+                    
                     return (
-                        <label key={p.key} className="flex items-center gap-2 cursor-pointer group/ctrl relative">
-                            <input type="checkbox" checked={!!val} onChange={(e) => update(e.target.checked)}
-                                className="w-3.5 h-3.5 accent-amber-500 rounded cursor-pointer" />
-                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{p.label}</span>
+                        <label key={p.key} className={`flex items-center gap-2 relative group/ctrl ${isForcedOrg ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}>
+                            <input type="checkbox" checked={displayVal} 
+                                disabled={isForcedOrg}
+                                onChange={(e) => update(e.target.checked)}
+                                className="w-3.5 h-3.5 accent-amber-500 rounded cursor-pointer disabled:opacity-50" />
+                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                                {p.label}
+                                {isForcedOrg && <span className="ml-2 text-[8px] text-amber-500/50 italic">(Enforced for Safety)</span>}
+                            </span>
                             <i data-lucide="info" className="w-2.5 h-2.5 text-slate-500 opacity-40 group-hover/ctrl:opacity-100 group-hover/ctrl:text-amber-400 transition-all cursor-help ml-2"></i>
                             <div className="absolute left-0 bottom-full mb-2 w-64 p-3 bg-slate-800/95 backdrop-blur-xl text-slate-200 text-[10px] rounded-xl shadow-2xl border border-white/10 opacity-0 invisible group-hover/ctrl:opacity-100 group-hover/ctrl:visible transition-all z-[100] pointer-events-none font-medium leading-relaxed">
                                 <div className="text-amber-400 font-bold mb-1 uppercase tracking-tighter text-[9px]">Parameter Logic</div>
-                                {p.tooltip}
+                                {isForcedOrg ? "This option is forced enabled during 'Copy' mode to prevent creating thousands of redundant file copies in your source root. Switch to 'Move' for in-place organization." : p.tooltip}
                             </div>
                         </label>
                     );
@@ -553,28 +734,6 @@
                 return groups;
             }, [paramSchema]);
 
-            const updateBackendRoot = async (path) => {
-                if (!path) return;
-                setIsRootSyncing(true);
-                try {
-                    const res = await fetch(`${serverUrl}/api/set_root`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ path: path.replace(/\\/g, "/") })
-                    });
-                    const result = await res.json();
-                    if (res.ok) {
-                        localStorage.setItem("organizedRoot", path);
-                        setBackendRoot(result.new_root || path);
-                    } else {
-                        alert("Error setting root: " + (result.error || "Unknown error"));
-                    }
-                } catch (e) {
-                    console.error("Failed to update root", e);
-                } finally {
-                    setIsRootSyncing(false);
-                }
-            };
 
             const loadLatestLog = async () => {
                 if (isFetchingLog) return;
@@ -663,19 +822,18 @@
                 }
             };
 
-            const runOrganizer = async (isRealRun = false) => {
-                if (isRunning) return;
-
-                // Sync the path to the backend first
-                if (organizedPath) {
-                    await updateBackendRoot(organizedPath);
-                }
+            const runOrganizer = async (isRealRun = false, overrides = {}) => {
+                if (isRunning || !organizedPath) return;
 
                 setIsRunning(true);
+                setIsConsoleExpanded(true);
                 setProgressLog([]);
-                setSelectedCluster(null);
+                
+                const finalParams = { ...aiParams, dry_run: !isRealRun, ...overrides };
+                
+                // Sync the path to the backend first
+                await updateBackendRoot(organizedPath);
 
-                const finalParams = { ...aiParams, dry_run: !isRealRun };
                 // Override disabled plugins: send 0 for weights, false for bools
                 paramSchema.forEach(p => {
                     if (p.is_plugin) {
@@ -701,9 +859,6 @@
                         setIsRunning(false);
                         return;
                     }
-
-                    // Auto-expand console when scan starts
-                    setIsConsoleExpanded(true);
 
                     // Start polling for completion & progress
                     const poll = setInterval(async () => {
@@ -736,6 +891,101 @@
                 } catch (e) {
                     alert("Failed to communicate with helper.");
                     setIsRunning(false);
+                }
+            };
+
+            const commitFromLog = async () => {
+                if (isRunning || !logFilename) return;
+                
+                setShowCommitConfirm(false);
+                setIsRunning(true);
+                setIsConsoleExpanded(true);
+                setProgressLog([
+                    `[COMMIT] Executing log: ${logFilename}`,
+                    `[COMMIT] Validating file integrity before operations...`
+                ]);
+
+                try {
+                    const res = await fetch(`${serverUrl}/api/commit_log`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ filename: logFilename })
+                    });
+
+                    if (!res.ok) {
+                        const err = await res.json();
+                        alert("Commit failed: " + err.error);
+                        setIsRunning(false);
+                        return;
+                    }
+
+                    // Poll for completion & progress (reuse existing pattern)
+                    const poll = setInterval(async () => {
+                        try {
+                            const progressRes = await fetch(`${serverUrl}/api/progress`);
+                            const progressData = await progressRes.json();
+                            
+                            if (progressData.log && progressData.log.length > 0) {
+                                setProgressLog(progressData.log);
+                            }
+                            
+                            if (!progressData.running) {
+                                clearInterval(poll);
+                                setIsRunning(false);
+                                setProgressLog(prev => [...prev, "[COMMIT] Done. Refresh log to see results."]);
+                                
+                                // Auto-refresh the latest log
+                                try {
+                                    const logRes = await fetch(`${serverUrl}/api/latest_log`);
+                                    if (logRes.ok) {
+                                        const logInfo = await logRes.json();
+                                        const csvRes = await fetch(`${serverUrl}/logs/${logInfo.filename}`);
+                                        const csvText = await csvRes.text();
+                                        const parsed = Papa.parse(csvText, { header: true, skipEmptyLines: true });
+                                        setData(parsed.data.filter(r => r.Original_Path));
+                                        setLogFilename(logInfo.filename);
+                                    }
+                                } catch(e) {}
+                            }
+                        } catch (e) {}
+                    }, 1000);
+                } catch (e) {
+                    alert("Failed to communicate with helper.");
+                    setIsRunning(false);
+                }
+            };
+
+            const cleanupEmptyDirs = async () => {
+                if (isCleaning || isRunning) return;
+                
+                setIsCleaning(true);
+                setIsConsoleExpanded(true);
+                setProgressLog(prev => [...prev.slice(-50), `[CLEANUP] Starting recursive empty folder scan...`]);
+                
+                try {
+                    const res = await fetch(`${serverUrl}/api/cleanup_empty_dirs`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' }
+                    });
+                    
+                    const result = await res.json();
+                    if (res.ok) {
+                        if (result.count > 0) {
+                            setProgressLog(prev => [
+                                ...prev, 
+                                `[CLEANUP] Success: Removed ${result.count} empty directories.`,
+                                ...result.deleted.map(d => `  - Deleted: ${d}`)
+                            ]);
+                        } else {
+                            setProgressLog(prev => [...prev, `[CLEANUP] Scan complete. No empty directories found.`]);
+                        }
+                    } else {
+                        setProgressLog(prev => [...prev, `[CLEANUP ERROR] ${result.error}`]);
+                    }
+                } catch (e) {
+                    setProgressLog(prev => [...prev, `[CLEANUP ERROR] Failed to connect to server.`]);
+                } finally {
+                    setIsCleaning(false);
                 }
             };
 
@@ -806,15 +1056,6 @@
                 });
             };
 
-            const groups = useMemo(() => {
-                const map = {};
-                data.forEach(item => {
-                    const id = item.Cluster_ID || "unknown";
-                    if (!map[id]) map[id] = [];
-                    map[id].push(item);
-                });
-                return map;
-            }, [data]);
 
             const getImageUrl = (item) => {
                 if (!item) return "";
@@ -870,7 +1111,7 @@
                             className="absolute top-3 right-0 translate-x-1/2 z-30 w-5 h-10 bg-slate-800 hover:bg-amber-500/20 border border-slate-700 hover:border-amber-500/40 rounded-full flex items-center justify-center transition-all group"
                             title={isTuningCollapsed ? 'Expand Tuning Lab' : 'Collapse Tuning Lab'}
                         >
-                            <i data-lucide={isTuningCollapsed ? 'chevron-right' : 'chevron-left'} className="w-3 h-3 text-slate-500 group-hover:text-amber-400 transition-colors"></i>
+                            <LucideIcon name={isTuningCollapsed ? 'chevron-right' : 'chevron-left'} className="w-3 h-3 text-slate-500 group-hover:text-amber-400 transition-colors" />
                         </button>
                         <div className={`p-6 border-b border-white/5 bg-gradient-to-b from-slate-900/50 to-transparent ${isTuningCollapsed ? 'hidden' : ''}`}>
                             <div className="flex items-center gap-3 mb-6 relative app-menu-container">
@@ -878,7 +1119,7 @@
                                     onClick={() => setIsMenuOpen(!isMenuOpen)}
                                     className="w-10 h-10 bg-gradient-to-br from-amber-400 to-orange-600 rounded-xl flex items-center justify-center shadow-lg shadow-amber-500/20 hover:scale-105 transition-all active:scale-95"
                                 >
-                                    <i data-lucide="sliders" className="text-white w-5 h-5"></i>
+                                    <LucideIcon name="sliders" className="text-white w-5 h-5" />
                                 </button>
                                 <h2 className="text-lg font-bold text-white tracking-tight">Tuning Lab</h2>
 
@@ -888,14 +1129,14 @@
                                             onClick={loadLatestLog}
                                             className="w-full px-4 py-2.5 text-left text-[11px] font-bold text-slate-300 hover:bg-white/5 flex items-center gap-3 transition-colors"
                                         >
-                                            <i data-lucide="zap" className="w-4 h-4 text-amber-500"></i>
+                                            <LucideIcon name="zap" className="w-4 h-4 text-amber-500" />
                                             Load Latest Log
                                         </button>
                                         <button
                                             onClick={triggerFileLoad}
                                             className="w-full px-4 py-2.5 text-left text-[11px] font-bold text-slate-300 hover:bg-white/5 flex items-center gap-3 transition-colors"
                                         >
-                                            <i data-lucide="file-up" className="w-4 h-4 text-amber-500"></i>
+                                            <LucideIcon name="file-up" className="w-4 h-4 text-amber-500" />
                                             Load Log File...
                                         </button>
                                         <div className="h-px bg-white/5 my-1 mx-2"></div>
@@ -903,7 +1144,7 @@
                                             onClick={browseLogs}
                                             className="w-full px-4 py-2.5 text-left text-[11px] font-bold text-slate-300 hover:bg-white/5 flex items-center gap-3 transition-colors"
                                         >
-                                            <i data-lucide="external-link" className="w-4 h-4 text-slate-500"></i>
+                                            <LucideIcon name="external-link" className="w-4 h-4 text-slate-500" />
                                             Browse Logs Folder
                                         </button>
                                         <input
@@ -923,27 +1164,34 @@
                                     onClick={() => setTuningTab('params')}
                                     className={`flex-1 py-2 text-[10px] font-black uppercase tracking-widest rounded-lg transition-all flex items-center justify-center gap-2 ${tuningTab === 'params' ? 'bg-amber-500 text-white shadow-lg shadow-amber-500/10' : 'text-slate-500 hover:text-slate-400'}`}
                                 >
-                                    <i data-lucide="list" className="w-3.5 h-3.5"></i>
+                                    <LucideIcon name="list" className="w-3.5 h-3.5" />
                                     Static Params
                                 </button>
                                 <button
                                     onClick={() => setTuningTab('pipeline')}
                                     className={`flex-1 py-2 text-[10px] font-black uppercase tracking-widest rounded-lg transition-all flex items-center justify-center gap-2 ${tuningTab === 'pipeline' ? 'bg-amber-500 text-white shadow-lg shadow-amber-500/10' : 'text-slate-500 hover:text-slate-400'}`}
                                 >
-                                    <i data-lucide="git-branch" className="w-3.5 h-3.5"></i>
+                                    <LucideIcon name="git-branch" className="w-3.5 h-3.5" />
                                     Pipeline Tree
                                 </button>
                             </div>
 
                             {/* Action Panel */}
-                            <div className="flex flex-col gap-4 bg-slate-900/40 p-5 rounded-2xl border border-white/5 shadow-inner">
-                                <div className="space-y-2">
-                                    <div className="flex items-center justify-between">
-                                        <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Media Source Folder</span>
-                                        {isRootSyncing && <i data-lucide="loader-2" className="w-3 h-3 text-amber-500 animate-spin"></i>}
+                            <div className="flex flex-col gap-3 bg-slate-900/40 p-4 rounded-xl border border-white/5 shadow-inner">
+                                <div className="space-y-1.5">
+                                    <div className="flex items-center gap-2 group relative">
+                                        <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Source Folder</span>
+                                        <div className="relative group/tooltip">
+                                            <LucideIcon name="info" className="w-3 h-3 text-slate-600 hover:text-amber-500 cursor-help transition-colors" />
+                                            <div className="absolute left-6 top-1/2 -translate-y-1/2 w-52 p-2.5 bg-slate-800 text-[9px] text-slate-300 rounded-lg border border-slate-700 shadow-2xl opacity-0 group-hover/tooltip:opacity-100 pointer-events-none transition-all z-50 leading-relaxed normal-case font-normal">
+                                                Simulate first to verify groupings. Commit will permanently move/copy files.
+                                            </div>
+                                        </div>
+                                        <div className="flex-1"></div>
+                                        {isRootSyncing && <LucideIcon name="loader-2" className="w-3 h-3 text-amber-500 animate-spin" />}
                                     </div>
                                     <input
-                                        className="w-full bg-black/40 border border-slate-700/50 rounded-xl px-3 py-2.5 text-[10px] font-mono text-slate-400 focus:outline-none focus:border-amber-500/30 transition-all font-bold"
+                                        className="w-full bg-black/40 border border-slate-700/50 rounded-xl px-3 py-1.5 text-[10px] font-mono text-slate-400 focus:outline-none focus:border-amber-500/30 transition-all font-bold"
                                         placeholder="E:/Media/Organize..."
                                         value={organizedPath}
                                         onChange={(e) => setOrganizedPath(e.target.value)}
@@ -951,28 +1199,49 @@
                                     />
                                 </div>
 
-                                <div className="grid gap-2">
+                                <div className="grid grid-cols-2 gap-2">
                                     <button
                                         onClick={() => runOrganizer(false)}
                                         disabled={isRunning || !organizedPath}
-                                        className={`w-full py-3.5 rounded-xl font-black text-[10px] uppercase tracking-[0.2em] transition-all flex items-center justify-center gap-3 ${isRunning ? 'bg-slate-800 text-slate-600' : 'bg-amber-500 hover:bg-amber-400 text-white shadow-lg shadow-amber-500/10 active:scale-[0.98]'}`}
+                                        className={`py-2 rounded-xl font-black text-[9px] uppercase tracking-wider transition-all flex items-center justify-center gap-2 ${isRunning ? 'bg-slate-800 text-slate-600' : 'bg-amber-600 hover:bg-amber-500 text-white shadow-lg shadow-amber-500/10 active:scale-[0.98]'}`}
                                     >
-                                        <i data-lucide={isRunning ? "loader-2" : "play"} className={`w-4 h-4 ${isRunning ? 'animate-spin' : ''}`}></i>
-                                        {isRunning ? "Processing..." : "Simulate Scan (Dry Run)"}
+                                        <LucideIcon name={isRunning ? "loader-2" : "play"} className={`w-3 h-3 ${isRunning ? 'animate-spin' : ''}`} />
+                                        {isRunning ? "Running..." : "Simulate"}
                                     </button>
 
                                     <button
-                                        onClick={() => runOrganizer(true)}
-                                        disabled={isRunning || !organizedPath}
-                                        className={`w-full py-2.5 rounded-xl font-bold text-[9px] uppercase tracking-widest transition-all flex items-center justify-center gap-2 ${isRunning ? 'bg-slate-800/50 text-slate-700' : 'bg-indigo-600 hover:bg-indigo-500 text-white border border-indigo-400/20 active:scale-[0.98]'}`}
+                                        onClick={() => runOrganizer(false, { force_rescan: true })}
+                                        disabled={isRunning || isCleaning || !organizedPath}
+                                        className={`py-2 rounded-xl font-bold text-[9px] uppercase tracking-wider transition-all flex items-center justify-center gap-2 border bg-amber-500/10 border-amber-500/20 text-amber-500 hover:bg-amber-500/20 active:scale-[0.98] ${isRunning || isCleaning ? 'opacity-40' : ''}`}
                                     >
-                                        <i data-lucide="zap" className={`w-3.5 h-3.5 ${isRunning ? 'opacity-20' : ''}`}></i>
-                                        Commit Changes (Live)
+                                        <LucideIcon name="refresh-cw" className={`w-3 h-3 ${isRunning ? 'animate-spin' : ''}`} />
+                                        Force Scan
+                                    </button>
+
+                                    <button
+                                        onClick={() => {
+                                            if (logFilename && data.length > 0) {
+                                                setShowCommitConfirm(true);
+                                            } else {
+                                                runOrganizer(true);
+                                            }
+                                        }}
+                                        disabled={isRunning || isCleaning || !organizedPath}
+                                        className={`py-2 rounded-xl font-bold text-[9px] uppercase tracking-wider transition-all flex items-center justify-center gap-2 ${isRunning ? 'bg-slate-800/50 text-slate-700' : logFilename && data.length > 0 ? 'bg-emerald-600 hover:bg-emerald-500 text-white border border-emerald-400/20 active:scale-[0.98]' : 'bg-indigo-600 hover:bg-indigo-500 text-white border border-indigo-400/20 active:scale-[0.98]'}`}
+                                    >
+                                        <LucideIcon name={logFilename && data.length > 0 ? "check-circle" : "zap"} className={`w-3 h-3 ${isRunning ? 'opacity-20' : ''}`} />
+                                        {logFilename && data.length > 0 ? 'Execute Log' : 'Commit'}
+                                    </button>
+
+                                    <button
+                                        onClick={cleanupEmptyDirs}
+                                        disabled={isRunning || isCleaning || !organizedPath}
+                                        className={`py-2 rounded-xl font-bold text-[9px] uppercase tracking-wider transition-all flex items-center justify-center gap-2 border bg-slate-900 shadow-inner hover:bg-slate-800 active:scale-[0.5] ${isRunning || isCleaning ? 'opacity-40 border-slate-800 text-slate-600' : 'border-slate-700 text-slate-400 hover:border-slate-500 hover:text-slate-300'}`}
+                                    >
+                                        <LucideIcon name={isCleaning ? "loader-2" : "trash-2"} className={`w-3 h-3 ${isCleaning ? 'animate-spin text-amber-500' : ''}`} />
+                                        {isCleaning ? "Clean" : "Cleanup"}
                                     </button>
                                 </div>
-                                <p className="text-[8px] text-slate-600 leading-relaxed text-center px-2 italic">
-                                    Simulate first to verify groupings. Commit will permanently move/copy files.
-                                </p>
                             </div>
                         </div>
 
@@ -983,7 +1252,7 @@
                                     <section>
                                         <div className="flex items-center justify-between text-[10px] font-bold text-slate-500 uppercase tracking-[0.2em] mb-4">
                                             <span>AI Parameters</span>
-                                            <i data-lucide="brain-circuit" className="w-3 h-3 opacity-50"></i>
+                                            <LucideIcon name="brain-circuit" className="w-3 h-3 opacity-50" />
                                         </div>
 
                                         {!showDiagPathPrompt ? (
@@ -992,7 +1261,7 @@
                                                 disabled={isDiagnosing}
                                                 className="w-full mb-6 py-2.5 bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 border border-indigo-500/20 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2"
                                             >
-                                                <i data-lucide={isDiagnosing ? "loader-2" : "microscope"} className={`w-3.5 h-3.5 ${isDiagnosing ? 'animate-spin' : ''}`}></i>
+                                                <LucideIcon name={isDiagnosing ? "loader-2" : "microscope"} className={`w-3.5 h-3.5 ${isDiagnosing ? 'animate-spin' : ''}`} />
                                                 {isDiagnosing ? "Analyzing..." : "Analyze Group Spread"}
                                             </button>
                                         ) : (
@@ -1059,6 +1328,8 @@
                                                             <div className="space-y-4 mb-4">
                                                                 {nonPlugins.map(p => {
                                                                     if (p.key === 'flatten_rename' && !isFlatteningEnabled) return null;
+                                                                    // Filter out force_rescan - handled by button
+                                                                    if (p.key === 'force_rescan') return null;
                                                                     return renderParamControl(p);
                                                                 })}
                                                             </div>
@@ -1078,7 +1349,7 @@
                                     <section>
                                         <div className="flex items-center justify-between text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] mb-4">
                                             <span>Workspace</span>
-                                            <i data-lucide="hard-drive" className="w-3 h-3 opacity-50"></i>
+                                            <LucideIcon name="hard-drive" className="w-3 h-3 opacity-50" />
                                         </div>
                                         <div className="bg-slate-900/40 p-4 rounded-2xl border border-white/5 flex flex-col gap-4 shadow-inner">
                                             <div className="flex items-center justify-between text-[9px] font-black uppercase tracking-widest">
@@ -1095,11 +1366,30 @@
                                 <div className="pipeline-tree py-2">
                                     <PipelineNode phase="Phase 01" title="Filter & Pre-sort" icon="filter">
                                         {paramSchema.filter(p => p.key === 'enable_video_sorting').map(p => renderPluginCard(p))}
+                                        
+                                        {/* Perceptual Video Deduplication Sub-section */}
+                                        <div className="bg-white/5 p-4 rounded-xl border border-white/5 space-y-3 mt-2">
+                                            <div className="text-[8px] font-black text-amber-500/50 uppercase tracking-widest mb-2 px-1 flex items-center gap-2">
+                                                <LucideIcon name="eye" className="w-2.5 h-2.5" />
+                                                Video Analysis
+                                            </div>
+                                            {paramSchema.filter(p => p.key === 'enable_perceptual_video_dedup' || p.key === 'enable_deep_video_scan').map(p => renderPluginCard(p))}
+                                            <div className="space-y-4 mt-2">
+                                                {paramSchema.filter(p => p.key === 'video_match_threshold' || p.key === 'video_max_workers').map(p => renderParamControl(p))}
+                                            </div>
+                                        </div>
                                     </PipelineNode>
 
                                     <PipelineNode phase="Phase 02" title="Media Integrity" icon="shield-check">
                                         <div className="grid gap-4">
                                             {paramSchema.filter(p => p.key === 'enable_deduplication' || p.key === 'enable_video_deduplication').map(p => renderPluginCard(p))}
+                                            <div className="bg-white/5 p-3 rounded-xl border border-white/5">
+                                                <div className="text-[7px] font-black text-slate-500 uppercase tracking-widest mb-2 px-1 flex items-center gap-1.5 opacity-60">
+                                                    <LucideIcon name="list-tree" className="w-2 h-2" />
+                                                    Priority System
+                                                </div>
+                                                {paramSchema.filter(p => p.key === 'dedup_priority').map(p => renderParamControl(p))}
+                                            </div>
                                         </div>
                                     </PipelineNode>
 
@@ -1143,7 +1433,7 @@
                                                             onClick={() => setStrategy(opt.id)}
                                                             className={`flex-1 py-2.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 ${strategy === opt.id ? 'bg-amber-500 text-white shadow-lg shadow-amber-500/10 active:scale-95' : 'text-slate-500 hover:text-slate-400 hover:bg-white/5'}`}
                                                         >
-                                                            <i data-lucide={opt.icon} className="w-3.5 h-3.5"></i>
+                                                            <LucideIcon name={opt.icon} className="w-3.5 h-3.5" />
                                                             {opt.label}
                                                         </button>
                                                     ))}
@@ -1155,7 +1445,7 @@
                                                         
                                                         <div className="bg-white/5 p-4 rounded-xl border border-white/5 space-y-4">
                                                             <div className="text-[8px] font-black text-amber-500/50 uppercase tracking-widest mb-2 px-1 flex items-center gap-2">
-                                                                <i data-lucide="cog" className="w-2.5 h-2.5"></i>
+                                                                <LucideIcon name="cog" className="w-2.5 h-2.5" />
                                                                 AI Configuration
                                                             </div>
                                                             {paramSchema.filter(p => p.group === 'weights' && p.key !== 'enable_color_features' && p.key !== 'enable_ai_clustering').map(p => renderPluginCard(p))}
@@ -1170,16 +1460,26 @@
                                                 {strategy === 'flatten' && (
                                                     <div className="bg-white/5 p-4 rounded-xl border border-white/5 animate-in fade-in slide-in-from-top-2 duration-300">
                                                         <div className="text-[8px] font-black text-amber-500/50 uppercase tracking-widest mb-4 px-1 flex items-center gap-2">
-                                                            <i data-lucide="layers" className="w-2.5 h-2.5"></i>
+                                                            <LucideIcon name="layers" className="w-2.5 h-2.5" />
                                                             Structural Override
                                                         </div>
                                                         {paramSchema.filter(p => p.key === 'flatten_rename').map(p => renderParamControl(p))}
+                                                        <div className="h-px bg-white/5 my-3"></div>
+                                                        {paramSchema.filter(p => p.key === 'rename_style').map(p => renderParamControl(p))}
+                                                        
+                                                        {/* Smart Flattening Indicator */}
+                                                        {(enabledPlugins['group_name_matches'] || enabledPlugins['group_name_prefix']) && (
+                                                            <div className="mt-4 p-2 bg-amber-500/10 rounded-lg border border-amber-500/20 flex items-center gap-2">
+                                                                <LucideIcon name="sparkles" className="w-3 h-3 text-amber-500" />
+                                                                <span className="text-[9px] font-black text-amber-500 uppercase tracking-widest">Smart Flattening Active</span>
+                                                            </div>
+                                                        )}
                                                     </div>
                                                 )}
 
                                                 {strategy === 'off' && (
                                                     <div className="text-[9px] text-slate-600 italic px-2 flex items-center gap-2">
-                                                        <i data-lucide="info" className="w-3 h-3"></i>
+                                                        <LucideIcon name="info" className="w-3 h-3" />
                                                         Files will follow existing hierarchy unless Pattern Matching is active.
                                                     </div>
                                                 )}
@@ -1191,16 +1491,97 @@
                                         phase="Phase 04"
                                         title="Context Attribution"
                                         icon="file-search"
-                                        isDeactivated={enabledPlugins['enable_folder_flattening']}
                                     >
-                                        <div className="grid gap-2">
-                                            {paramSchema.filter(p => p.group === 'name_grouping').map(p => renderPluginCard(p))}
+                                        <div className="grid gap-3">
+                                            {paramSchema.filter(p => p.group === 'name_grouping' && p.is_plugin).map(p => renderPluginCard(p))}
+                                            
+                                            {(enabledPlugins['group_name_matches'] || enabledPlugins['group_name_prefix']) && (
+                                                <div className="bg-white/5 p-4 rounded-xl border border-white/5 space-y-4 animate-in fade-in slide-in-from-top-2">
+                                                    <div className="text-[8px] font-black text-amber-500/50 uppercase tracking-widest px-1 flex items-center gap-2">
+                                                        <LucideIcon name="settings-2" className="w-2.5 h-2.5" />
+                                                        Pattern Sensitivity
+                                                    </div>
+                                                    {paramSchema.filter(p => p.group === 'name_grouping' && !p.is_plugin).map(p => renderParamControl(p))}
+                                                </div>
+                                            )}
                                         </div>
                                     </PipelineNode>
 
                                     <PipelineNode phase="Phase 05" title="Deployment Action" icon="truck">
-                                        <div className="bg-slate-900/40 p-4 rounded-xl border border-white/5">
+                                        <div className="bg-slate-900/40 p-4 rounded-xl border border-white/5 space-y-4">
+                                            {paramSchema.filter(p => p.group === 'deployment').map(p => renderParamControl(p))}
+                                            
+                                            {/* CAUTION: Base Root Warning */}
+                                            {aiParams.use_organized_subfolder === false && (
+                                                <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-xl flex items-start gap-3 animate-pulse">
+                                                    <div className="w-8 h-8 rounded-lg bg-red-500/20 flex items-center justify-center text-red-500 flex-shrink-0">
+                                                        <LucideIcon name="alert-triangle" className="w-4 h-4" />
+                                                    </div>
+                                                    <div>
+                                                        <div className="text-[10px] font-black text-red-500 uppercase tracking-widest">Base Root Caution</div>
+                                                        <div className="text-[9px] text-slate-400 mt-0.5 leading-relaxed">
+                                                            Files will be moved/copied <span className="text-red-400 font-bold">directly into your source directory</span>. 
+                                                            This makes "Undo" extremely difficult and may co-mingle files with your originals.
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            <div className="h-px bg-white/5 my-2"></div>
                                             {paramSchema.filter(p => p.key === 'action').map(p => renderParamControl(p))}
+                                            <div className="mt-4 p-3 bg-blue-500/10 rounded-xl border border-blue-500/20 group/structure relative cursor-help">
+                                                <div className="flex items-center gap-3">
+                                                    <div className="w-8 h-8 rounded-lg bg-blue-500/20 flex items-center justify-center text-blue-400">
+                                                        <LucideIcon name="help-circle" className="w-4 h-4" />
+                                                    </div>
+                                                    <div>
+                                                        <div className="text-[10px] font-black text-blue-400 uppercase tracking-widest">Structure Preview</div>
+                                                        <div className="text-[9px] text-slate-400">Hover to see how files will land</div>
+                                                    </div>
+                                                </div>
+                                                
+                                                {/* Visual Tooltip */}
+                                                <div className="absolute left-0 bottom-full mb-3 w-80 p-4 bg-[#0a0f1d] border border-blue-500/30 rounded-2xl shadow-2xl opacity-0 invisible group-hover/structure:opacity-100 group-hover/structure:visible transition-all z-[200] backdrop-blur-3xl font-mono text-[9px] leading-relaxed">
+                                                    <div className="flex items-center gap-2 mb-3 pb-2 border-b border-white/5">
+                                                        <LucideIcon name="folder-tree" className="w-3 h-3 text-blue-400" />
+                                                        <span className="text-[10px] font-black text-white uppercase tracking-tighter">Path Visualization</span>
+                                                    </div>
+                                                    
+                                                    <div className="space-y-4">
+                                                        <div>
+                                                            <div className="text-blue-400/60 font-bold mb-1 flex items-center gap-1.5">
+                                                                <div className="w-1.5 h-1.5 rounded-full bg-blue-400"></div>
+                                                                STRUCTURED (Default)
+                                                            </div>
+                                                            <div className="pl-3 border-l border-white/10 text-slate-400 grayscale-[0.3]">
+                                                                <div>/Organized</div>
+                                                                <div className="pl-3">/groups</div>
+                                                                <div className="pl-6 text-blue-300">/Cluster_001</div>
+                                                                <div className="pl-9 text-slate-300">image_01.jpg</div>
+                                                                <div className="pl-3">/videos</div>
+                                                                <div className="pl-6 text-blue-300">/vertical</div>
+                                                            </div>
+                                                        </div>
+                                                        
+                                                        <div className="pt-2 border-t border-white/5">
+                                                            <div className="text-amber-400/60 font-bold mb-1 flex items-center gap-1.5">
+                                                                <div className="w-1.5 h-1.5 rounded-full bg-amber-400"></div>
+                                                                FLAT ROOT
+                                                            </div>
+                                                            <div className="pl-3 border-l border-white/10 text-slate-400">
+                                                                <div>{aiParams.use_organized_subfolder ? '/Organized' : '/[Base Root]'}</div>
+                                                                <div className="pl-3 text-amber-300">Group_001 - image_01.jpg</div>
+                                                                <div className="pl-3 text-amber-300">Vertical - vid_01.mp4</div>
+                                                                <div className="pl-3 text-slate-500 italic mt-1">// Subfolders bypassed</div>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    
+                                                    <div className="mt-4 p-2 bg-slate-900/50 rounded-lg text-[8px] text-slate-500 border border-white/5 italic">
+                                                        Note: Duplicates always isolated to `/duplicates/` folder.
+                                                    </div>
+                                                </div>
+                                            </div>
                                         </div>
                                     </PipelineNode>
                                 </div>
@@ -1223,7 +1604,7 @@
                         {isTuningCollapsed && (
                             <div className="flex-1 flex flex-col items-center pt-6 gap-4">
                                 <div className="w-8 h-8 bg-gradient-to-br from-amber-400 to-orange-600 rounded-lg flex items-center justify-center shadow-lg shadow-amber-500/20">
-                                    <i data-lucide="sliders" className="text-white w-4 h-4"></i>
+                                    <LucideIcon name="sliders" className="text-white w-4 h-4" />
                                 </div>
                                 <span className="text-[8px] font-black text-slate-600 uppercase tracking-widest [writing-mode:vertical-lr] rotate-180">Tuning Lab</span>
                             </div>
@@ -1238,7 +1619,7 @@
                             className="absolute top-3 right-0 translate-x-1/2 z-30 w-5 h-10 bg-slate-800 hover:bg-amber-500/20 border border-slate-700 hover:border-amber-500/40 rounded-full flex items-center justify-center transition-all group"
                             title={isInventoryCollapsed ? 'Expand Inventory' : 'Collapse Inventory'}
                         >
-                            <i data-lucide={isInventoryCollapsed ? 'chevron-right' : 'chevron-left'} className="w-3 h-3 text-slate-500 group-hover:text-amber-400 transition-colors"></i>
+                            <LucideIcon name={isInventoryCollapsed ? 'chevron-right' : 'chevron-left'} className="w-3 h-3 text-slate-500 group-hover:text-amber-400 transition-colors" />
                         </button>
 
                         {!isInventoryCollapsed ? (
@@ -1252,7 +1633,7 @@
                                     </div>
                                     {logFilename && (
                                         <div className="flex items-center gap-2 px-1 text-[9px] font-bold text-slate-500 truncate" title={logFilename}>
-                                            <i data-lucide="file-text" className="w-2.5 h-2.5 opacity-50"></i>
+                                            <LucideIcon name="file-text" className="w-2.5 h-2.5 opacity-50" />
                                             <span className="truncate">{logFilename}</span>
                                         </div>
                                     )}
@@ -1278,7 +1659,7 @@
                                                     }`}
                                             >
                                                 <div className="flex items-center gap-3 relative z-10">
-                                                    <i data-lucide={isNoise ? "help-circle" : (isDup ? "copy" : (isVideo ? "video" : "folder"))} className={`w-3.5 h-3.5 ${isSelected ? "text-amber-500" : "text-slate-600"}`}></i>
+                                                    <LucideIcon name={isNoise ? "help-circle" : (isDup ? "copy" : (isVideo ? "video" : "folder"))} className={`w-3.5 h-3.5 ${isSelected ? "text-amber-500" : "text-slate-600"}`} />
                                                     <span className="text-xs font-bold leading-none truncate max-w-[120px]">{label}</span>
                                                 </div>
                                                 <span className={`text-[9px] font-black px-1.5 py-0.5 rounded border relative z-10 ${isSelected ? "bg-amber-500 text-white border-amber-400" : "bg-slate-900 border-slate-700 text-slate-500"}`}>
@@ -1308,7 +1689,7 @@
                                             className={`w-9 h-9 rounded-lg flex items-center justify-center transition-all ${isSelected ? 'bg-amber-500/15 text-amber-500 border border-amber-500/30' : 'hover:bg-slate-800/50 text-slate-600 border border-transparent hover:text-slate-400'}`}
                                             title={key}
                                         >
-                                            <i data-lucide={isNoise ? "help-circle" : (isDup ? "copy" : (isVideo ? "video" : "folder"))} className="w-3.5 h-3.5"></i>
+                                            <LucideIcon name={isNoise ? "help-circle" : (isDup ? "copy" : (isVideo ? "video" : "folder"))} className="w-3.5 h-3.5" />
                                         </button>
                                     );
                                 })}
@@ -1320,60 +1701,106 @@
                     <main className="flex-1 flex flex-col bg-[#050914] relative overflow-hidden">
                         {data.length === 0 ? (
                             <div key="workspace-empty" className="flex-1 flex flex-col items-center justify-center opacity-20 grayscale pointer-events-none select-none">
-                                <i data-lucide="cloud-off" className="w-16 h-16 mb-4 text-slate-700"></i>
+                                <LucideIcon name="cloud-off" className="w-16 h-16 mb-4 text-slate-700" />
                                 <span className="text-[10px] font-black uppercase tracking-widest text-slate-800">No Log Loaded</span>
                             </div>
                         ) : selectedCluster ? (
                             <div key="workspace-active" className="flex-1 flex flex-col overflow-hidden">
                                 <header className="p-10 pb-6 flex justify-between items-end backdrop-blur-xl bg-slate-950/20 border-b border-white/5">
-                                    <div>
-                                        <div className="flex items-center gap-2 text-amber-500 text-[10px] font-black uppercase tracking-[0.3em] mb-3">
-                                            <div className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></div>
-                                            Group Resolution
+                                    <div className="flex border-b border-white/5 pb-8 mb-10 items-end justify-between w-full">
+                                        <div className="flex items-center gap-8">
+                                            <div className="space-y-1">
+                                                <h2 className="text-4xl font-black text-white tracking-tighter flex items-center gap-4">
+                                                    {selectedCluster === 'noise' ? (
+                                                        <>
+                                                            <LucideIcon name="wind" className="text-slate-500 w-8 h-8" />
+                                                            <span className="bg-gradient-to-r from-slate-400 to-slate-600 bg-clip-text text-transparent">Noise / Outliers</span>
+                                                        </>
+                                                    ) : selectedCluster === 'duplicate' ? (
+                                                        <>
+                                                            <LucideIcon name="copy" className="text-amber-500 w-8 h-8" />
+                                                            <span className="bg-gradient-to-r from-amber-400 to-amber-600 bg-clip-text text-transparent uppercase italic">Deduplicated</span>
+                                                        </>
+                                                    ) : (
+                                                        <>
+                                                            <LucideIcon name="folder-heart" className="text-amber-500 w-8 h-8" />
+                                                            <span className="bg-gradient-to-r from-white to-slate-400 bg-clip-text text-transparent">{selectedCluster.replace('group_', 'Cluster ')}</span>
+                                                        </>
+                                                    )}
+                                                </h2>
+                                                <div className="flex items-center gap-4 text-[10px] font-black text-slate-500 uppercase tracking-[0.25em]">
+                                                    <span>Inventory: {groups[selectedCluster]?.length || 0} items</span>
+                                                    <div className="h-3 w-px bg-white/10"></div>
+                                                    <span>Cluster Integrity: {selectedCluster === 'noise' ? 'LOW' : 'SENSITIVE'}</span>
+                                                </div>
+                                            </div>
                                         </div>
-                                        <h1 className="text-5xl font-black text-white tracking-tighter capitalize leading-none">{selectedCluster.replace("_", " ")}</h1>
-                                        <div className="flex gap-4 mt-6">
-                                            <div className="flex flex-col">
-                                                <span className="text-[9px] font-bold uppercase text-slate-600">Populated</span>
-                                                <span className="text-sm font-bold text-slate-400">{groups[selectedCluster].length} Files</span>
+
+                                        {/* View Toggle and Controls */}
+                                        <div className="flex items-center gap-6">
+                                            {selectedCluster === 'duplicate' && (
+                                                <div className="flex bg-slate-900/60 p-1.5 rounded-2xl border border-white/5 backdrop-blur-xl shadow-2xl">
+                                                    <button 
+                                                        onClick={() => setDuplicateViewMode('grid')}
+                                                        className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${duplicateViewMode === 'grid' ? 'bg-amber-500 text-black shadow-lg shadow-amber-500/20' : 'text-slate-500 hover:text-white'}`}
+                                                    >
+                                                        <LucideIcon name="grid-3x3" className="w-3.5 h-3.5" />
+                                                        Grid
+                                                    </button>
+                                                    <button 
+                                                        onClick={() => setDuplicateViewMode('rows')}
+                                                        className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${duplicateViewMode === 'rows' ? 'bg-emerald-500 text-black shadow-lg shadow-emerald-500/20' : 'text-slate-500 hover:text-white'}`}
+                                                    >
+                                                        <LucideIcon name="rows-3" className="w-3.5 h-3.5" />
+                                                        Rows
+                                                    </button>
+                                                </div>
+                                            )}
+
+                                            <div className="flex items-center gap-3 bg-slate-900/50 p-1.5 rounded-2xl border border-white/5">
+                                                <button onClick={() => setGridSize(Math.max(1, gridSize - 1))} className="p-2.5 hover:bg-slate-800 rounded-lg transition-colors text-slate-500 hover:text-white"><LucideIcon name="minus" className="w-3.5 h-3.5" /></button>
+                                                <span className="text-[10px] font-black min-w-[50px] text-center text-slate-400 uppercase tracking-tighter">{gridSize} COL</span>
+                                                <button onClick={() => setGridSize(Math.min(12, gridSize + 1))} className="p-2.5 hover:bg-slate-800 rounded-lg transition-colors text-slate-500 hover:text-white"><LucideIcon name="plus" className="w-3.5 h-3.5" /></button>
                                             </div>
-                                            <div className="w-[1px] h-full bg-slate-800"></div>
-                                            <div className="flex flex-col">
-                                                <span className="text-[9px] font-bold uppercase text-slate-600">Diagnostic</span>
-                                                <span className="text-sm font-bold text-slate-400 truncate max-w-[300px]">{groups[selectedCluster][0].Reason || "Organic grouping"}</span>
-                                            </div>
-                                            <div className="w-[1px] h-full bg-slate-800"></div>
+
                                             <button
                                                 onClick={() => window.open(`explorer.html?anchor=${selectedCluster}`, '_blank')}
-                                                className="self-end px-6 py-2 bg-amber-500 text-black rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-white transition-all flex items-center gap-2 shadow-[0_0_20px_rgba(245,158,11,0.2)]"
+                                                className="px-6 py-3 bg-white/5 text-white border border-white/10 rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-amber-500 hover:text-black hover:border-amber-500 transition-all flex items-center gap-2 shadow-2xl"
                                             >
-                                                <i data-lucide="cloud" className="w-4 h-4"></i>
-                                                Cloud Explorer
+                                                <LucideIcon name="cloud" className="w-4 h-4" />
+                                                Explorer
                                             </button>
                                         </div>
-                                    </div>
-
-                                    <div className="flex items-center gap-4 bg-slate-900/50 p-1.5 rounded-2xl border border-white/5">
-                                        <button onClick={() => setGridSize(Math.max(1, gridSize - 1))} className="p-3 hover:bg-slate-800 rounded-xl transition-colors"><i data-lucide="minus" className="w-4 h-4"></i></button>
-                                        <span className="text-xs font-black min-w-[60px] text-center">{gridSize} COLUMNS</span>
-                                        <button onClick={() => setGridSize(Math.min(12, gridSize + 1))} className="p-3 hover:bg-slate-800 rounded-xl transition-colors"><i data-lucide="plus" className="w-4 h-4"></i></button>
                                     </div>
                                 </header>
 
                                 <div className="flex-1 overflow-y-auto p-10 scrollbar-thin">
-                                    <div
-                                        key={selectedCluster}
-                                        className="grid gap-8"
-                                        style={{ gridTemplateColumns: `repeat(${gridSize}, minmax(0, 1fr))` }}
-                                    >
-                                        {groups[selectedCluster].map((item) => (
-                                            <MediaCard
-                                                key={item.Original_Path || item.Old_Path || item.Source_Path || Math.random()}
-                                                item={item}
-                                                getImageUrl={getImageUrl}
-                                                onImageClick={setLightboxItem}
-                                            />
-                                        ))}
+                                    {/* Main Interaction Layer */}
+                                    <div className="relative">
+                                        {selectedCluster === 'duplicate' && duplicateViewMode === 'rows' ? (
+                                            <div className="space-y-2 pb-24">
+                                                {groupedDuplicates.map((group, idx) => (
+                                                    <DedupeRow 
+                                                        key={idx}
+                                                        original={group.original}
+                                                        duplicates={group.duplicates}
+                                                        getImageUrl={getImageUrl}
+                                                        onImageClick={setLightboxItem}
+                                                    />
+                                                ))}
+                                            </div>
+                                        ) : (
+                                            <div className="grid gap-8" style={{ gridTemplateColumns: `repeat(${gridSize}, minmax(0, 1fr))` }}>
+                                                {(groups[selectedCluster] || []).map((item, idx) => (
+                                                    <MediaCard
+                                                        key={idx}
+                                                        item={item}
+                                                        getImageUrl={getImageUrl}
+                                                        onImageClick={setLightboxItem}
+                                                    />
+                                                ))}
+                                            </div>
+                                        )}
                                     </div>
                                 </div>
                             </div>
@@ -1381,7 +1808,7 @@
                             <div key="workspace-select-prompt" className="flex-1 flex flex-col items-center justify-center p-20">
                                 <div className="w-32 h-32 rounded-full border border-white/5 flex items-center justify-center mb-8 relative">
                                     <div className="absolute inset-0 rounded-full border-2 border-amber-500/20 border-t-amber-500 animate-spin"></div>
-                                    <i data-lucide="crosshair" className="w-12 h-12 text-slate-800"></i>
+                                    <LucideIcon name="crosshair" className="w-12 h-12 text-slate-800" />
                                 </div>
                                 <h1 className="text-xl font-black text-slate-700 uppercase tracking-[0.5em]">Target Selection Required</h1>
                                 <p className="text-xs text-slate-800 mt-4 max-w-xs text-center leading-relaxed">Choose a data cluster from the sidebar to inspect the AI's grouping logic and visual relevance.</p>
@@ -1402,11 +1829,20 @@
                                     <div className="flex items-center gap-6">
                                         <button
                                             onClick={() => setIsConsoleExpanded(!isConsoleExpanded)}
-                                            className={`flex items-center gap-2 px-3 py-1 rounded-lg transition-all ${isConsoleExpanded ? 'bg-amber-500/20 text-amber-500' : 'bg-slate-800 text-slate-500 hover:text-slate-300'}`}
+                                            className={`flex items-center gap-2 px-3 py-1 rounded-lg transition-all ${isConsoleExpanded ? 'bg-amber-500/20 text-amber-500 font-bold' : 'bg-slate-800 text-slate-500 hover:text-slate-300'}`}
                                         >
-                                            <i data-lucide="terminal" className="w-3.5 h-3.5"></i>
-                                            <span className="text-[9px] font-black uppercase tracking-widest">Console</span>
-                                            <i data-lucide={isConsoleExpanded ? "chevron-down" : "chevron-up"} className="w-3 h-3 ml-1"></i>
+                                            <LucideIcon name="terminal" className="w-3.5 h-3.5" />
+                                            {isConsoleExpanded ? (
+                                                <span className="flex items-center gap-2 animate-in fade-in duration-300">
+                                                    <span className="text-[9px] font-black uppercase tracking-widest">Console</span>
+                                                    <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+                                                </span>
+                                            ) : (
+                                                <span className="flex items-center gap-2 animate-in fade-in duration-300">
+                                                    <span className="text-[9px] font-black uppercase tracking-widest">Console</span>
+                                                    <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m18 15-6-6-6 6"/></svg>
+                                                </span>
+                                            )}
                                         </button>
                                         <div className="flex items-center gap-2">
                                             <span className="opacity-40">Status:</span>
@@ -1478,14 +1914,14 @@
                                 className="absolute left-4 top-1/2 -translate-y-1/2 w-12 h-12 bg-black/50 hover:bg-black/80 backdrop-blur-sm rounded-full flex items-center justify-center text-white/60 hover:text-white transition-all border border-white/10 hover:border-white/20"
                                 onClick={(e) => { e.stopPropagation(); lightboxNav('prev'); }}
                             >
-                                <i data-lucide="chevron-left" className="w-6 h-6"></i>
+                                <LucideIcon name="chevron-left" className="w-6 h-6" />
                             </button>
                             {/* Next Arrow */}
                             <button
                                 className="absolute right-4 top-1/2 -translate-y-1/2 w-12 h-12 bg-black/50 hover:bg-black/80 backdrop-blur-sm rounded-full flex items-center justify-center text-white/60 hover:text-white transition-all border border-white/10 hover:border-white/20"
                                 onClick={(e) => { e.stopPropagation(); lightboxNav('next'); }}
                             >
-                                <i data-lucide="chevron-right" className="w-6 h-6"></i>
+                                <LucideIcon name="chevron-right" className="w-6 h-6" />
                             </button>
                             <div className="absolute bottom-8 left-1/2 -translate-x-1/2 bg-black/60 backdrop-blur-sm px-8 py-3 rounded-2xl border border-white/10 flex items-center gap-6">
                                 {selectedCluster && groups[selectedCluster] && (
@@ -1521,7 +1957,7 @@
                                 className="absolute top-6 right-6 text-white/40 hover:text-white transition-colors"
                                 onClick={(e) => { e.stopPropagation(); setLightboxItem(null); }}
                             >
-                                <i data-lucide="x" className="w-6 h-6"></i>
+                                <LucideIcon name="x" className="w-6 h-6" />
                             </button>
                         </div>
                     )}
@@ -1532,7 +1968,7 @@
                             <div className="glass p-8 rounded-3xl w-full max-w-md border-amber-500/30 shadow-[0_0_50px_rgba(245,158,11,0.1)] relative" style={{ animation: 'scaleIn 0.3s ease-out' }}>
                                 <div className="flex items-center gap-3 mb-6">
                                     <div className="w-10 h-10 bg-amber-500 rounded-xl flex items-center justify-center shadow-lg shadow-amber-500/20">
-                                        <i data-lucide="microscope" className="text-white w-5 h-5"></i>
+                                        <LucideIcon name="microscope" className="text-white w-5 h-5" />
                                     </div>
                                     <div>
                                         <h3 className="text-sm font-black text-white uppercase tracking-widest">Diagnostic Report</h3>
@@ -1554,7 +1990,7 @@
 
                                     <div className="bg-amber-500/5 border border-amber-500/20 p-5 rounded-2xl">
                                         <div className="text-[10px] font-black text-amber-500 uppercase tracking-widest mb-4 flex items-center gap-2">
-                                            <i data-lucide="sparkles" className="w-3 h-3"></i>
+                                            <LucideIcon name="sparkles" className="w-3 h-3" />
                                             AI Recommendations
                                         </div>
                                         <div className="space-y-3">
@@ -1592,7 +2028,71 @@
                                     onClick={() => setDiagResult(null)}
                                     className="absolute top-6 right-6 text-white/20 hover:text-white transition-colors"
                                 >
-                                    <i data-lucide="x" className="w-5 h-5"></i>
+                                    <LucideIcon name="x" className="w-5 h-5" />
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Commit Confirmation Modal */}
+                    {showCommitConfirm && (
+                        <div className="fixed inset-0 bg-black/80 backdrop-blur-xl flex items-center justify-center z-[100] animate-in fade-in duration-200">
+                            <div className="bg-[#0a1628] border border-white/10 rounded-3xl p-10 max-w-lg w-full shadow-2xl space-y-6">
+                                <div className="flex items-center gap-4 mb-2">
+                                    <div className="w-14 h-14 rounded-2xl bg-emerald-500/20 flex items-center justify-center">
+                                        <LucideIcon name="shield-check" className="w-7 h-7 text-emerald-500" />
+                                    </div>
+                                    <div>
+                                        <h2 className="text-lg font-black text-white tracking-tight">Pre-flight Check</h2>
+                                        <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mt-1">Commit from Loaded Log</p>
+                                    </div>
+                                </div>
+
+                                <div className="bg-white/5 rounded-2xl p-5 space-y-3 border border-white/5">
+                                    <div className="flex justify-between items-center">
+                                        <span className="text-xs font-bold text-slate-400">Log File</span>
+                                        <span className="text-xs font-mono text-amber-400 bg-amber-400/10 px-2 py-1 rounded-lg truncate max-w-[250px]">{logFilename}</span>
+                                    </div>
+                                    <div className="flex justify-between items-center">
+                                        <span className="text-xs font-bold text-slate-400">Operations</span>
+                                        <span className="text-sm font-black text-white">{data.length} files</span>
+                                    </div>
+                                    <div className="flex justify-between items-center">
+                                        <span className="text-xs font-bold text-slate-400">Action</span>
+                                        <span className={`text-xs font-black uppercase tracking-widest px-2 py-1 rounded-lg ${settings?.action === 'move' ? 'bg-red-500/20 text-red-400' : 'bg-blue-500/20 text-blue-400'}`}>
+                                            {settings?.action || 'copy'}
+                                        </span>
+                                    </div>
+                                </div>
+
+                                <div className="bg-amber-500/10 border border-amber-500/20 rounded-xl p-4 flex items-start gap-3">
+                                    <LucideIcon name="alert-triangle" className="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0" />
+                                    <div className="text-[10px] text-amber-400/80 leading-relaxed">
+                                        <span className="font-bold text-amber-400">MD5 Integrity Verification</span> will run before each file operation. Files that have changed since the simulation will be automatically skipped.
+                                    </div>
+                                </div>
+
+                                <div className="flex gap-3 pt-2">
+                                    <button
+                                        onClick={commitFromLog}
+                                        className="flex-1 py-4 bg-emerald-600 hover:bg-emerald-500 text-white font-black text-xs uppercase tracking-widest rounded-2xl transition-all shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-2"
+                                    >
+                                        <LucideIcon name="check-circle" className="w-4 h-4" />
+                                        Confirm & Execute
+                                    </button>
+                                    <button
+                                        onClick={() => setShowCommitConfirm(false)}
+                                        className="px-6 py-4 bg-slate-800 hover:bg-slate-700 text-slate-400 font-black text-xs uppercase tracking-widest rounded-2xl transition-all"
+                                    >
+                                        Cancel
+                                    </button>
+                                </div>
+
+                                <button
+                                    onClick={() => setShowCommitConfirm(false)}
+                                    className="absolute top-6 right-6 text-white/20 hover:text-white transition-colors"
+                                >
+                                    <LucideIcon name="x" className="w-5 h-5" />
                                 </button>
                             </div>
                         </div>

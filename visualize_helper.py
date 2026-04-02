@@ -327,13 +327,43 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                         PROGRESS_LOG.append(traceback.format_exc())
                     finally:
                         IS_RUNNING = False
-
                 threading.Thread(target=run_organizer).start()
                 
                 self.send_json(200, {"status": "launched", "command": " ".join(cmd)})
             except Exception as e:
                 print(f"[API] Run Error: {e}")
                 self.send_json(500, {"error": str(e)})
+        
+        elif self.path == '/api/cleanup_empty_dirs':
+            try:
+                if not CURRENT_ROOT.exists():
+                    self.send_json(404, {"error": "Root directory not found"})
+                    return
+                
+                deleted = []
+                # Traverse bottom-up to catch nested empty folders
+                # Avoid deleting "Organized" or "logs" if they happen to be empty
+                for root, dirs, files in os.walk(CURRENT_ROOT, topdown=False):
+                    for name in dirs:
+                        dir_path = Path(root) / name
+                        if name in ["Organized", "logs"]:
+                            continue
+                        
+                        try:
+                            # Use iterdir for speed and to avoid list overhead
+                            if not any(dir_path.iterdir()):
+                                dir_path.rmdir()
+                                rel_path = str(dir_path.relative_to(CURRENT_ROOT))
+                                deleted.append(rel_path)
+                                print(f"[CLEANUP] Deleted empty folder: {rel_path}")
+                        except Exception as e:
+                            print(f"[CLEANUP ERR] Failed to delete {dir_path}: {e}")
+                
+                self.send_json(200, {"status": "success", "count": len(deleted), "deleted": deleted})
+            except Exception as e:
+                print(f"[CLEANUP ERR] {e}")
+                self.send_json(500, {"error": str(e)})
+
         elif self.path == '/api/diagnose':
             content_length = int(self.headers.get('Content-Length', 0))
             post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
@@ -387,6 +417,122 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
             except Exception as e:
                 print(f"[API] Diagnose Error: {e}")
                 self.send_json(500, {"error": str(e)})
+        elif self.path == '/api/commit_log':
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                params = json.loads(post_data)
+                log_filename = params.get('filename', '').strip()
+                if not log_filename:
+                    self.send_json(400, {"error": "Log filename is required"})
+                    return
+
+                # Resolve the log path
+                log_path = SCRIPT_DIR / "logs" / log_filename
+                if not log_path.exists():
+                    # Try as absolute path
+                    log_path = Path(log_filename)
+                
+                if not log_path.exists():
+                    self.send_json(404, {"error": f"Log file not found: {log_filename}"})
+                    return
+
+                print(f"\n[API] Commit from Log: {log_path}")
+                
+                cmd = [sys.executable, "-u", "media_organizer.py", "--commit-log", str(log_path)]
+                
+                IS_RUNNING = True
+                PROGRESS_LOG = []
+                cmd_str = ' '.join(cmd)
+                print(f"Executing: {cmd_str}")
+                PROGRESS_LOG.append(f"[API] Launching commit: {cmd_str}")
+                PROGRESS_LOG.append(f"[API] Working directory: {Path(__file__).parent}")
+                PROGRESS_LOG.append("[API] Validating file integrity...")
+
+                def run_commit():
+                    global IS_RUNNING, PROGRESS_LOG
+                    try:
+                        env = os.environ.copy()
+                        env["PYTHONUNBUFFERED"] = "1"
+                        script_dir = str(Path(__file__).parent)
+                        
+                        process = subprocess.Popen(
+                            cmd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            bufsize=0,
+                            env=env,
+                            cwd=script_dir
+                        )
+                        
+                        PROGRESS_LOG.append("[API] Commit process started (PID: {})".format(process.pid))
+                        
+                        line_buffer = b''
+                        while True:
+                            chunk = process.stdout.read1(4096) if hasattr(process.stdout, 'read1') else process.stdout.read(1)
+                            if not chunk:
+                                break
+                            line_buffer += chunk
+                            
+                            while b'\n' in line_buffer or b'\r' in line_buffer:
+                                n_pos = line_buffer.find(b'\n')
+                                r_pos = line_buffer.find(b'\r')
+                                
+                                if n_pos == -1:
+                                    split_pos = r_pos
+                                elif r_pos == -1:
+                                    split_pos = n_pos
+                                else:
+                                    split_pos = min(n_pos, r_pos)
+                                
+                                raw_line = line_buffer[:split_pos]
+                                if split_pos + 1 < len(line_buffer) and line_buffer[split_pos:split_pos+2] == b'\r\n':
+                                    line_buffer = line_buffer[split_pos+2:]
+                                else:
+                                    line_buffer = line_buffer[split_pos+1:]
+                                
+                                try:
+                                    line = raw_line.decode('utf-8', errors='replace').strip()
+                                except:
+                                    line = str(raw_line)
+                                
+                                if line:
+                                    PROGRESS_LOG.append(line)
+                                    print(f"[COMMIT] {line}")
+                        
+                        if line_buffer:
+                            try:
+                                line = line_buffer.decode('utf-8', errors='replace').strip()
+                            except:
+                                line = str(line_buffer)
+                            if line:
+                                PROGRESS_LOG.append(line)
+                                print(f"[COMMIT] {line}")
+                        
+                        process.wait()
+                        
+                        if process.returncode == 0:
+                            PROGRESS_LOG.append("[API] Commit completed successfully.")
+                            print("[API] Commit completed successfully.")
+                        else:
+                            PROGRESS_LOG.append(f"[API] Commit failed with code {process.returncode}")
+                            print(f"[API] Commit failed with code {process.returncode}")
+                    except Exception as e:
+                        import traceback
+                        err_msg = f"[API] Error during commit: {e}"
+                        print(err_msg)
+                        print(traceback.format_exc())
+                        PROGRESS_LOG.append(err_msg)
+                        PROGRESS_LOG.append(traceback.format_exc())
+                    finally:
+                        IS_RUNNING = False
+                
+                threading.Thread(target=run_commit).start()
+                self.send_json(200, {"status": "launched", "log_file": str(log_path)})
+            except Exception as e:
+                print(f"[API] Commit Error: {e}")
+                self.send_json(500, {"error": str(e)})
+
         else:
             self.send_error(404, "Unknown API endpoint")
 

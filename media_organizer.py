@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
+from tqdm import tqdm
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -50,6 +51,7 @@ LOG_COLUMNS = [
     "Media_Type",
     "Reason",
     "Match_Confidence",
+    "Match_Source",
     "Settings",
     "Near_Misses",
     "Review_Needed",
@@ -166,12 +168,26 @@ PARAM_SCHEMA = [
         "group": "core",
     },
     {
+        "key": "video_max_workers", "cli": "--video-max-workers", "type": "int",
+        "default": 4, "min": 1, "max": 32,
+        "label": "Max Parallel Video Workers",
+        "tooltip": "Limits concurrent video decodes. Lower values (e.g., 2-4) prevent memory exhaustion on large libraries.",
+        "group": "core",
+    },
+    {
         "key": "enable_deduplication", "cli": "--enable-deduplication", "type": "bool",
         "default": True,
         "label": "Image De-duplication",
         "tooltip": "Generates MD5 checksums for every image to identify byte-for-byte identical files regardless of their filename.",
         "group": "core",
         "is_plugin": True, "plugin_icon": "zap",
+    },
+    {
+        "key": "dedup_priority", "cli": "--dedup-priority", "type": "choice",
+        "choices": ["alphabetical", "path_depth"], "default": "alphabetical",
+        "label": "Deduplication Strategy",
+        "tooltip": "Alphabetical: First file A-Z is original. Path Depth: Deeper folders (context-rich) win over root files.",
+        "group": "core",
     },
     {
         "key": "enable_color_features", "cli": "--enable-color-features", "type": "bool",
@@ -185,15 +201,37 @@ PARAM_SCHEMA = [
         "key": "enable_folder_flattening", "cli": "--enable-folder-flattening", "type": "bool",
         "default": False,
         "label": "Subfolder Flattening",
-        "tooltip": "Overrides AI. Moves files from all subfolders into the root Organized folder. Useful for flattening complex directory structures into a single list.",
+        "tooltip": "Bypasses AI clustering to simply move all files out of subfolders and into a single directory, optionally renaming them by their original parent folder.",
         "group": "core",
         "is_plugin": True, "plugin_icon": "layers",
+    },
+    {
+        "key": "use_organized_subfolder", "cli": "--use-organized-subfolder", "type": "bool",
+        "default": True,
+        "label": "Use '/Organized/' Subfolder",
+        "tooltip": "Enabled (Default): Creates a clean '/Organized/' folder. Disabled: Organizes directly into your source root (Base Folder).",
+        "group": "deployment",
+    },
+    {
+        "key": "deployment_structure", "cli": "--deployment-structure", "type": "choice",
+        "choices": ["structured", "flat"], "default": "structured",
+        "label": "Deployment Structure",
+        "tooltip": "Structured: Organizes into sub-directories (/groups, /videos). Flat Root: All unique files land directly in the target root.",
+        "group": "deployment",
     },
     {
         "key": "flatten_rename", "cli": "--flatten-rename", "type": "bool",
         "default": True,
         "label": "Contextual Rename",
         "tooltip": "When flattening, prepends the parent folder name and adds a sequence number (e.g., 'Folder - Name - 001.jpg') based on creation date.",
+        "group": "core",
+    },
+    {
+        "key": "rename_style", "cli": "--rename-style", "type": "choice",
+        "default": "folder_name",
+        "choices": ["folder_name", "folder_only"],
+        "label": "Rename Style",
+        "tooltip": "'folder_name' = Folder - OriginalName - 001.jpg. 'folder_only' = Folder - 001.jpg.",
         "group": "core",
     },
     {
@@ -220,10 +258,10 @@ PARAM_SCHEMA = [
         "group": "general",
     },
     {
-        "key": "use_feature_cache", "cli": "--use-feature-cache", "type": "bool",
-        "default": True,
-        "label": "Use Feature Cache",
-        "tooltip": "Speeds up re-runs by saving/loading AI embeddings to a local .json file. Highly recommended for iterative tuning.",
+        "key": "force_rescan", "cli": "--force-rescan", "type": "bool",
+        "default": False,
+        "label": "Force Full folder Scan",
+        "tooltip": "Bypasses the feature cache and re-analyzes every file with AI. Slow, but useful for total re-evaluation.",
         "group": "general",
     },
     # ── Clustering ───────────────────────────────────────────
@@ -324,6 +362,20 @@ PARAM_SCHEMA = [
         "tooltip": "Detects shared word patterns in filenames to group collections exported with common naming schemas.",
         "group": "name_grouping",
         "is_plugin": True, "plugin_icon": "list-ordered",
+    },
+    {
+        "key": "name_grouping_min_size", "cli": "--name-grouping-min-size", "type": "int",
+        "default": 2, "min": 1, "max": 12,
+        "label": "Min Group Items",
+        "tooltip": "The minimum number of files needed to form a group based on naming patterns.",
+        "group": "name_grouping",
+    },
+    {
+        "key": "name_grouping_sensitivity", "cli": "--name-grouping-sensitivity", "type": "float",
+        "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05,
+        "label": "Name Pattern Sensitivity",
+        "tooltip": "How loosely we consider two filenames a 'match'. Higher values require more significant words to overlap.",
+        "group": "name_grouping",
     },
     {
         "key": "visual_weight", "cli": "--visual-weight", "type": "float",
@@ -564,7 +616,7 @@ def short_path_hash(path: Path, length: int = 4) -> str:
 # ---------------------------------------------------------------------------
 
 
-def detect_video_orientation(filepath: Path) -> str:
+def detect_video_orientation(filepath: Path) -> tuple[str, int, int]:
     """
     Use ffprobe to determine effective orientation.
     Returns 'landscape' or 'portrait'.
@@ -599,29 +651,31 @@ def detect_video_orientation(filepath: Path) -> str:
     tags = stream.get("tags", {})
     if "rotate" in tags:
         rotation = int(tags["rotate"])
-
-    # Also check side_data_list for rotation (newer FFmpeg)
+# Also check side_data_list for rotation (newer FFmpeg)
     for sd in stream.get("side_data_list", []):
         if "rotation" in sd:
             rotation = abs(int(sd["rotation"]))
             break
 
-    # Swap dimensions if rotated 90° or 270°
     if rotation in (90, 270):
         width, height = height, width
 
-    orientation = "landscape" if width >= height else "portrait"
-    return orientation, width, height
+    mode = "portrait" if height > width else "landscape"
+    return mode, width, height
 
 
 def phase1_video_sorting(
     root: Path, 
     dry_run: bool, 
+    org_root: Path,
     action: str = "copy", 
     enable_deduplication: bool = True,
     enable_perceptual: bool = False,
     enable_deep: bool = False,
-    video_match_threshold: int = 8
+    video_match_threshold: int = 8,
+    max_workers: int = 4,
+    dedup_priority: str = "alphabetical",
+    deployment_structure: str = "structured"
 ) -> tuple[list[dict], list[Path]]:
     """
     Move video files into videos/horizontal/ or videos/vertical/.
@@ -637,11 +691,16 @@ def phase1_video_sorting(
     entries: list[dict] = []
     non_video_files: list[Path] = []
     
-    org_root = root / ORGANIZED_DIR_NAME
-    dest_h = org_root / "videos" / "horizontal"
-    dest_v = org_root / "videos" / "vertical"
+    # Define destinations
     dup_dir = org_root / "duplicates"
     review_dir = dup_dir / "review_needed"
+    
+    if deployment_structure == "flat":
+        dest_h = org_root
+        dest_v = org_root
+    else:
+        dest_h = org_root / "videos" / "horizontal"
+        dest_v = org_root / "videos" / "vertical"
 
     all_potential_videos = []
     for path in sorted(root.rglob("*")):
@@ -663,13 +722,18 @@ def phase1_video_sorting(
         return [], non_video_files
 
     # 1. Parallel Hashing
-    log.info("Analyzing %d videos with parallel workers...", len(all_potential_videos))
+    log.info("Analyzing %d videos with parallel workers (cap: %d)...", len(all_potential_videos), max_workers)
     worker_args = [(v, enable_perceptual, enable_deep) for v in all_potential_videos]
     
     video_data = []
-    # Use max_workers=None to use all cores
-    with ProcessPoolExecutor() as executor:
-        video_data = list(executor.map(process_video_worker, worker_args))
+    # Use max_workers limit to prevent memory spikes
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        video_data = list(tqdm(
+            executor.map(process_video_worker, worker_args),
+            total=len(all_potential_videos),
+            desc="Analyzing Videos",
+            unit="video"
+        ))
 
     # 2. Comparison Logic
     # Group results by various hashes
@@ -686,7 +750,7 @@ def phase1_video_sorting(
 
     processed_paths = set()
 
-    def handle_video(data, cluster_id, reason, confidence, dest_base_dir, review_needed=False):
+    def handle_video(data, cluster_id, reason, confidence, dest_base_dir, review_needed=False, match_source=None):
         fpath = data["path"]
         if fpath in processed_paths:
             return
@@ -720,6 +784,7 @@ def phase1_video_sorting(
             "Media_Type": "video",
             "Reason": reason,
             "Match_Confidence": confidence,
+            "Match_Source": match_source,
             "Review_Needed": "Yes" if review_needed else "No"
         })
         processed_paths.add(fpath)
@@ -730,7 +795,10 @@ def phase1_video_sorting(
             if len(matches) > 1:
                 # Keep the first one, mark others as duplicates
                 # Sorting by path to be deterministic
-                sorted_matches = sorted(matches, key=lambda x: str(x["path"]))
+                if dedup_priority == "path_depth":
+                    sorted_matches = sorted(matches, key=lambda x: (-len(x["path"].parts), str(x["path"])))
+                else:
+                    sorted_matches = sorted(matches, key=lambda x: str(x["path"]))
                 # The "original" (to keep)
                 # Actually, in this script's flow, we move everything to 'Organized'.
                 # So the first one goes to landscape/portrait, others go to duplicate.
@@ -738,7 +806,7 @@ def phase1_video_sorting(
                 handle_video(first, f"video/original", "Video: Unique (Binary)", "1.0", dest_h)
                 
                 for dup in sorted_matches[1:]:
-                    handle_video(dup, "duplicate", f"Duplicate: Exact MD5 ({h[:8]})", "1.0 (Bit-for-bit)", None)
+                    handle_video(dup, "duplicate", f"Matched to: {first['path'].name}", "1.0 (Bit-for-bit)", None, match_source=first['path'].name)
 
     # Level 2: Squint (pHash)
     if enable_perceptual:
@@ -752,7 +820,7 @@ def phase1_video_sorting(
                     # Is there ANOTHER file (processed or not) with the same pHash?
                     others = [m for m in matches if m["path"] != match["path"]]
                     if others:
-                        handle_video(match, "duplicate/review", f"High-Prob Match: pHash Squint ({ph})", "0.9 (Visual)", None, review_needed=True)
+                        handle_video(match, "duplicate/review", f"Matched to: {others[0]['path'].name}", "0.9 (Visual)", None, review_needed=True, match_source=others[0]['path'].name)
 
     # Level 3: Deep (videohash)
     if enable_deep and deep_hashes:
@@ -769,7 +837,7 @@ def phase1_video_sorting(
                 h2 = hex_to_hash(data2["deep"])
                 distance = h1 - h2
                 if distance <= video_match_threshold:
-                    handle_video(data1, "duplicate/review", f"Deep Match: videohash (dist {distance})", f"0.8 (Temporal)", None, review_needed=True)
+                    handle_video(data1, "duplicate/review", f"Matched to: {data2['path'].name}", f"0.8 (Temporal)", None, review_needed=True, match_source=data2['path'].name)
                     break
 
     # 3. Handle remaining unique videos
@@ -789,8 +857,9 @@ def phase1_video_sorting(
 
 
 def phase2_deduplication(
-    root: Path, files: list[Path], dry_run: bool, action: str = "copy"
-) -> tuple[list[dict], list[Path]]:
+    root: Path, files: list[Path], dry_run: bool, org_root: Path, action: str = "copy",
+    dedup_priority: str = "alphabetical"
+) -> tuple[list[dict], list[Path], dict[str, str]]:
     """
     Hash images; move duplicates to /duplicates/.
     Returns (log_entries, unique_image_paths).
@@ -799,14 +868,18 @@ def phase2_deduplication(
     log.info("PHASE 2 — Image De-duplication")
     log.info("=" * 60)
 
-    org_root = root / ORGANIZED_DIR_NAME
     dup_dir = org_root / "duplicates"
     entries: list[dict] = []
     unique: list[Path] = []
     seen_hashes: dict[str, Path] = {}
-
     image_files = [f for f in files if f.suffix.lower() in IMAGE_EXTENSIONS]
     non_image_files = [f for f in files if f.suffix.lower() not in IMAGE_EXTENSIONS]
+
+    # Pre-sort to respect dedup priority
+    if dedup_priority == "path_depth":
+        image_files = sorted(image_files, key=lambda p: (-len(p.parts), str(p)))
+    else:
+        image_files = sorted(image_files, key=lambda p: str(p))
 
     for fpath in image_files:
         # Skip files already in our output dirs
@@ -836,8 +909,9 @@ def phase2_deduplication(
                     "Hash": h,
                     "Cluster_ID": "duplicate",
                     "Media_Type": "image",
-                    "Reason": f"Duplicate: Exact MD5 match ({h[:8]})",
+                    "Reason": f"Matched to: {seen_hashes[h].name}",
                     "Match_Confidence": "1.0 (Bit-for-bit)",
+                    "Match_Source": seen_hashes[h].name,
                 }
             )
         else:
@@ -856,11 +930,12 @@ def phase2_deduplication(
 
 
 def phase2b_folder_flattening(
-    root: Path, images: list[Path], dry_run: bool, action: str = "copy", rename: bool = True
-) -> tuple[list[dict], list[Path]]:
+    root: Path, images: list[Path], dry_run: bool, org_root: Path, action: str = "copy",
+    rename: bool = True, rename_style: str = "folder_name"
+) -> tuple[list[dict], list[Path], dict[str, str]]:
     """
     Flatten subfolders into the root of Organized.
-    Returns (log_entries, remaining_files_not_flattened).
+    Returns (log_entries, remaining_files_not_flattened, path_to_hash).
     """
     log.info("=" * 60)
     log.info("PHASE 2b — Subfolder Flattening")
@@ -869,34 +944,43 @@ def phase2b_folder_flattening(
     entries: list[dict] = []
     remaining: list[Path] = []
     
-    org_root = root / ORGANIZED_DIR_NAME
+    dup_dir = org_root / "duplicates"
     
     # 1. Group by parent folder relative to root
-    # Exclusion: files already in Organized/ (shouldn't happen here due to earlier filters)
     folders = defaultdict(list)
     for p in images:
         try:
-            # Check if it's in a subfolder relative to root
             rel = p.parent.relative_to(root)
-            if str(rel) == ".":
-                # In root already
-                remaining.append(p)
-                continue
-            folders[rel].append(p)
+            # Store root files under a virtual "[ROOT]" parent
+            folder_key = rel if str(rel) != "." else Path("[ROOT]")
+            folders[folder_key].append(p)
         except ValueError:
-            # Outside root? (unlikely)
             remaining.append(p)
+
+    # Track hashes to return for Phase 3 clustering
+    path_to_hash = {}
 
     # 2. Process each folder
     for rel_path, paths in sorted(folders.items()):
         parent_name = rel_path.name
+        is_root = (rel_path == Path("[ROOT]"))
         # Sort by creation time
         paths.sort(key=lambda x: x.stat().st_ctime if x.exists() else 0)
         
         for i, fpath in enumerate(paths, 1):
-            if rename:
-                # {Folder} - {Original Name} - {Seq}
-                new_name = f"{parent_name} - {fpath.stem} - {i:03d}{fpath.suffix}"
+            # Calculate hash BEFORE move (avoids FileNotFoundError)
+            h = ""
+            if fpath.suffix.lower() in IMAGE_EXTENSIONS:
+                h = md5_hash(fpath)
+                path_to_hash[str(fpath)] = h
+
+            if rename and not is_root:
+                if rename_style == "folder_only":
+                    # {Folder} - {Seq}
+                    new_name = f"{parent_name} - {i:03d}{fpath.suffix}"
+                else:
+                    # {Folder} - {Original Name} - {Seq}
+                    new_name = f"{parent_name} - {fpath.stem} - {i:03d}{fpath.suffix}"
             else:
                 new_name = fpath.name
                 
@@ -914,7 +998,7 @@ def phase2b_folder_flattening(
                 "Original_Path": str(fpath),
                 "New_Path": str(dest) if not dry_run else f"[DRY RUN] {dest}",
                 "New_Filename": dest.name,
-                "Hash": md5_hash(fpath) if fpath.suffix.lower() in IMAGE_EXTENSIONS else "",
+                "Hash": h,
                 "Cluster_ID": "flattened",
                 "Media_Type": "image" if fpath.suffix.lower() in IMAGE_EXTENSIONS else "other",
                 "Reason": f"Flattened from subfolder: {rel_path}",
@@ -922,7 +1006,7 @@ def phase2b_folder_flattening(
             })
             
     log.info("Phase 2b complete: %d files flattened.", len(entries))
-    return entries, remaining, {str(p): md5_hash(p) for p in images}
+    return entries, remaining, path_to_hash
 
 
 # ---------------------------------------------------------------------------
@@ -933,7 +1017,9 @@ def apply_name_grouping_overrides(
     valid_paths: list[Path],
     labels: np.ndarray,
     group_name_matches: bool,
-    group_name_prefix: bool
+    group_name_prefix: bool,
+    min_size: int = 2,
+    sensitivity: float = 0.5
 ) -> np.ndarray:
     """
     Reassign cluster labels based on exact filename matches or prefix patterns.
@@ -959,7 +1045,7 @@ def apply_name_grouping_overrides(
         next_new_label = max(labels) + 1 if len(labels) > 0 else 0
 
         for name, indices in name_groups.items():
-            if len(indices) < 2:
+            if len(indices) < min_size:
                 continue 
 
             current_labels = [labels[idx] for idx in indices]
@@ -1002,14 +1088,17 @@ def apply_name_grouping_overrides(
         prefix_groups: dict[str, list[int]] = defaultdict(list)
         for idx, fpath in enumerate(valid_paths):
             core = get_core_signals(fpath.stem)
-            if core and len(core) > 2:
+            # Similarity scales the minimum character length required for a match signal.
+            # Sensitivity 0.0 -> threshold 0; Sensitivity 1.0 -> threshold 10
+            threshold = int(sensitivity * 10)
+            if core and len(core) >= threshold:
                 prefix_groups[core].append(idx)
 
         merged_count = 0
         next_new_label = max(labels) + 1 if len(labels) > 0 else 0
 
         for core, indices in prefix_groups.items():
-            if len(indices) < 2:
+            if len(indices) < min_size:
                 continue
 
             current_labels = [labels[idx] for idx in indices]
@@ -1037,9 +1126,13 @@ def phase3_standalone_grouping(
     root: Path,
     image_paths: list[Path],
     dry_run: bool,
+    org_root: Path,
     action: str = "copy",
     group_name_matches: bool = False,
     group_name_prefix: bool = False,
+    name_grouping_min_size: int = 2,
+    name_grouping_sensitivity: float = 0.5,
+    deployment_structure: str = "structured"
 ) -> tuple[list[dict], dict[int, list[Path]]]:
     """
     Run name-based grouping WITHOUT AI clustering.
@@ -1056,22 +1149,24 @@ def phase3_standalone_grouping(
     valid_paths = image_paths
     labels = np.full(len(valid_paths), -1)
 
-    # Apply overrides
-    labels = apply_name_grouping_overrides(valid_paths, labels, group_name_matches, group_name_prefix)
+    labels = apply_name_grouping_overrides(
+        valid_paths, labels, group_name_matches, group_name_prefix,
+        min_size=name_grouping_min_size,
+        sensitivity=name_grouping_sensitivity
+    )
 
     # Move files and build entries
-    org_root = root / ORGANIZED_DIR_NAME
     entries: list[dict] = []
     cluster_map: dict[int, list[Path]] = defaultdict(list)
 
     for fpath, label in zip(valid_paths, labels):
         h = md5_hash(fpath)
         if label == -1:
-            dest_dir = org_root / "unsorted"
+            dest_dir = org_root if deployment_structure == "flat" else org_root / "unsorted"
             cluster_id = "noise"
-            reason = "Unsorted: No naming pattern matches found"
+            reason = "Outlier: No pattern match"
         else:
-            dest_dir = org_root / "groups" / f"Group_{label:03d}"
+            dest_dir = org_root if deployment_structure == "flat" else org_root / "groups" / f"Group_{label:03d}"
             cluster_id = f"group_{label:03d}"
             reason = f"Pattern: Group_{label:03d} name/sequence match"
 
@@ -1107,6 +1202,7 @@ def phase3_clustering(
     root: Path,
     image_paths: list[Path],
     dry_run: bool,
+    org_root: Path,
     action: str = "copy",
     min_cluster_size: int = 3,
     min_samples: int = None,
@@ -1119,13 +1215,16 @@ def phase3_clustering(
     visual_weight: float = 1.0,
     group_name_matches: bool = False,
     group_name_prefix: bool = False,
+    name_grouping_min_size: int = 2,
+    name_grouping_sensitivity: float = 0.5,
     ai_clustering_mode: str = "individual",
-    use_feature_cache: bool = True,
+    force_rescan: bool = False,
     hash_map: Optional[dict[str, str]] = None,
     enable_color_features: bool = True,
     grid_detail: int = 16,
     use_lab_space: bool = True,
     similarity_sensitivity: Optional[float] = None,
+    deployment_structure: str = "structured"
 ) -> tuple[list[dict], dict[int, list[Path]]]:
     """
     Generate CLIP embeddings + temporal features, cluster with HDBSCAN.
@@ -1140,7 +1239,7 @@ def phase3_clustering(
         return [], {}
 
     # 1. Initialize Cache
-    fcache = FeatureCache(root) if use_feature_cache else None
+    fcache = FeatureCache(root)
     hash_map = hash_map or {}
 
     # ------------------------------------------------------------------
@@ -1167,8 +1266,8 @@ def phase3_clustering(
         try:
             md5 = hash_map.get(str(fpath)) or md5_hash(fpath)
             
-            # 2. Check Cache
-            cached = fcache.get(fpath, md5) if fcache else None
+            # 2. Check Cache (Skip if force_rescan is True)
+            cached = fcache.get(fpath, md5) if fcache and not force_rescan else None
             
             if cached:
                 # Use cached features
@@ -1381,7 +1480,13 @@ def phase3_clustering(
     # ------------------------------------------------------------------
     # 3d-post  Name-Based Overrides
     # ------------------------------------------------------------------
-    labels = apply_name_grouping_overrides(valid_paths, labels, group_name_matches, group_name_prefix)
+    # 4. Integrate name grouping overrides (heuristic patterns)
+    if group_name_matches or group_name_prefix:
+        labels = apply_name_grouping_overrides(
+            valid_paths, labels, group_name_matches, group_name_prefix,
+            min_size=name_grouping_min_size,
+            sensitivity=name_grouping_sensitivity
+        )
 
     # ------------------------------------------------------------------
     # 3d  Geometric Diagnostics
@@ -1407,7 +1512,6 @@ def phase3_clustering(
     # ------------------------------------------------------------------
     # 3e  Move files
     # ------------------------------------------------------------------
-    org_root = root / ORGANIZED_DIR_NAME
     entries: list[dict] = []
     cluster_map: dict[int, list[Path]] = defaultdict(list)
 
@@ -1415,7 +1519,7 @@ def phase3_clustering(
     for zip_idx, (fpath, label, prob) in enumerate(zip(valid_paths, labels, probs)):
         h = md5_hash(fpath)
         if label == -1:
-            dest_dir = org_root / "unsorted"
+            dest_dir = org_root if deployment_structure == "flat" else org_root / "unsorted"
             cluster_id = "noise"
             # Find closest cluster medoid for diagnostics
             best_dist = float("inf")
@@ -1432,7 +1536,7 @@ def phase3_clustering(
             else:
                 reason = "Outlier: Strength below threshold (No clusters found)"
         else:
-            dest_dir = org_root / "groups" / f"Group_{label:03d}"
+            dest_dir = org_root if deployment_structure == "flat" else org_root / "groups" / f"Group_{label:03d}"
             cluster_id = f"group_{label:03d}"
             disp = cluster_stats[label]["dispersion"]
             reason = f"Cluster: Group_{label:03d} assignment (Dispersion: {disp:.3f})"
@@ -1490,10 +1594,16 @@ def phase4_contextual_naming(
     root: Path,
     phase3_entries: list[dict],
     dry_run: bool,
+    org_root: Path,
+    rename_style: str = "folder_name",
 ) -> list[dict]:
     """
     Rename files inside /groups/*/ and /unsorted/ based on their *original*
     parent folder name + sequential numbering.  Returns updated log entries.
+
+    rename_style:
+        'folder_name'  -> Folder - OriginalName - 001.jpg
+        'folder_only'  -> Folder - 001.jpg
     """
     log.info("=" * 60)
     log.info("PHASE 4 — Contextual Naming & Attribution")
@@ -1542,8 +1652,18 @@ def phase4_contextual_naming(
             orig = Path(entry["Original_Path"])
             
             if orig.parent.resolve() == root.resolve():
-                # Keep original filename for root-level files
-                new_name = orig.name
+                # Detect if it's in a clustered group (works for both structured and flat)
+                cluster_id = entry.get("Cluster_ID", "")
+                is_in_group = cluster_id.startswith("group_") and cluster_id != "group_noise"
+                
+                if is_in_group:
+                    # Sequence-only for root files in groups
+                    ext = Path(entry["New_Filename"]).suffix
+                    new_name = f"{orig.stem} - {counter:03d}{ext}"
+                else:
+                    # Keep original filename for root-level files elsewhere
+                    new_name = orig.name
+
                 # Simple collision check
                 temp_path = dest_dir / new_name
                 if temp_path.exists() and temp_path != Path(entry["New_Path"].replace("[DRY RUN] ", "")):
@@ -1559,8 +1679,11 @@ def phase4_contextual_naming(
                     base = f"{base}_{disambig}"
 
                 ext = Path(entry["New_Filename"]).suffix
-                new_name = f"{base}_{counter:03d}{ext}"
-                counter += 1
+                orig_stem = orig.stem
+                if rename_style == "folder_name":
+                    new_name = f"{base} - {orig_stem} - {counter:03d}{ext}"
+                else:
+                    new_name = f"{base} - {counter:03d}{ext}"
 
             current_path = Path(entry["New_Path"].replace("[DRY RUN] ", ""))
             final_path = dest_dir / new_name
@@ -1617,6 +1740,149 @@ def phase5_write_log(root: Path, all_entries: list[dict], dry_run: bool, setting
 
     log.info("Audit log written to %s  (%d entries).", csv_path, len(all_entries))
     return csv_path
+
+
+# ---------------------------------------------------------------------------
+# Commit from Log — execute a dry-run log without re-scanning
+# ---------------------------------------------------------------------------
+
+
+def commit_from_log(log_path: Path, action_override: str = None) -> Path:
+    """
+    Read a previously generated dry-run CSV log and execute the file operations.
+    
+    For each entry:
+      1. Verify Original_Path still exists.
+      2. If a Hash is recorded, verify the file's current MD5 matches.
+      3. Execute the move/copy operation via safe_action.
+    
+    Returns the path to the new "committed" log file.
+    """
+    log.info("=" * 60)
+    log.info("COMMIT FROM LOG — Executing saved plan")
+    log.info("=" * 60)
+    log.info("Source log: %s", log_path)
+
+    if not log_path.exists():
+        log.error("Log file not found: %s", log_path)
+        sys.exit(1)
+
+    # 1. Read the CSV log
+    with open(log_path, "r", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        entries = list(reader)
+
+    if not entries:
+        log.warning("Log file is empty. Nothing to commit.")
+        return log_path
+
+    # 2. Extract settings from first row
+    settings = {}
+    try:
+        settings_json = entries[0].get("Settings", "{}")
+        settings = json.loads(settings_json) if settings_json else {}
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    action = action_override or settings.get("action", "copy")
+    log.info("Action mode: %s", action.upper())
+    log.info("Entries to process: %d", len(entries))
+
+    # 3. Validation & Execution
+    committed = []
+    skipped_missing = []
+    skipped_hash = []
+    skipped_exists = []
+    errors = []
+
+    log.info("-" * 60)
+    log.info("Phase 1/2: Validating file integrity...")
+    log.info("-" * 60)
+
+    for i, entry in enumerate(entries, 1):
+        orig_path_str = entry.get("Original_Path", "")
+        new_path_str = entry.get("New_Path", "")
+        recorded_hash = entry.get("Hash", "")
+
+        # Strip dry-run prefixes from paths
+        new_path_str = new_path_str.replace("[DRY RUN] ", "").replace("[COPY] ", "").replace("[MOVE] ", "")
+
+        src = Path(orig_path_str)
+        dst = Path(new_path_str)
+
+        # --- Check 1: Source file exists ---
+        if not src.exists():
+            skipped_missing.append(entry)
+            log.warning("  [SKIP] Missing: %s", src.name)
+            continue
+
+        # --- Check 2: Hash integrity (only for entries with a hash) ---
+        if recorded_hash:
+            try:
+                current_hash = md5_hash(src)
+                if current_hash != recorded_hash:
+                    skipped_hash.append(entry)
+                    log.warning("  [SKIP] Hash mismatch: %s (expected %s, got %s)",
+                                src.name, recorded_hash[:12], current_hash[:12])
+                    continue
+            except Exception as e:
+                errors.append({"entry": entry, "error": str(e)})
+                log.error("  [ERROR] Hash check failed for %s: %s", src.name, e)
+                continue
+
+        # --- Check 3: Destination already exists ---
+        if dst.exists():
+            skipped_exists.append(entry)
+            log.info("  [SKIP] Already exists: %s", dst.name)
+            continue
+
+        # --- Execute ---
+        try:
+            safe_action(src, dst, dry_run=False, action=action)
+            entry["New_Path"] = str(dst)
+            committed.append(entry)
+        except Exception as e:
+            errors.append({"entry": entry, "error": str(e)})
+            log.error("  [ERROR] Failed to %s %s: %s", action, src.name, e)
+
+        # Progress reporting
+        if i % 50 == 0 or i == len(entries):
+            log.info("  Progress: %d/%d processed", i, len(entries))
+
+    # 4. Summary
+    log.info("=" * 60)
+    log.info("COMMIT SUMMARY")
+    log.info("=" * 60)
+    log.info("  [OK] Committed:          %d", len(committed))
+    log.info("  [--] Skipped (missing):  %d", len(skipped_missing))
+    log.info("  [--] Skipped (hash):     %d", len(skipped_hash))
+    log.info("  [--] Skipped (exists):   %d", len(skipped_exists))
+    log.info("  [!!] Errors:             %d", len(errors))
+
+    # 5. Write a new "committed" log
+    committed_settings = {**settings, "dry_run": False, "committed_from": str(log_path)}
+    all_result_entries = []
+    for e in committed:
+        e["Reason"] = f"[COMMITTED] {e.get('Reason', '')}"
+        all_result_entries.append(e)
+    for e in skipped_missing:
+        e["Reason"] = f"[SKIPPED:MISSING] {e.get('Reason', '')}"
+        e["Review_Needed"] = "true"
+        all_result_entries.append(e)
+    for e in skipped_hash:
+        e["Reason"] = f"[SKIPPED:HASH_MISMATCH] {e.get('Reason', '')}"
+        e["Review_Needed"] = "true"
+        all_result_entries.append(e)
+    for e in skipped_exists:
+        e["Reason"] = f"[SKIPPED:EXISTS] {e.get('Reason', '')}"
+        all_result_entries.append(e)
+
+    # Determine root from original entries
+    root_guess = Path(entries[0]["Original_Path"]).parent
+    result_log_path = phase5_write_log(root_guess, all_result_entries, dry_run=False, settings=committed_settings)
+
+    log.info("Committed log written to: %s", result_log_path)
+    return result_log_path
 
 
 # ---------------------------------------------------------------------------
@@ -1732,12 +1998,20 @@ def _get_video_params() -> dict:
         except ValueError:
             match_threshold = 8
 
+    max_workers = 4
+    raw_workers = _prompt("  Max Concurrent Video Workers [4]: ", "4")
+    try:
+        max_workers = int(raw_workers)
+    except ValueError:
+        max_workers = 4
+
     return {
         "enable_video_sorting": enable_sorting,
         "enable_video_deduplication": enable_dedup,
         "enable_perceptual_video_dedup": enable_perceptual,
         "enable_deep_video_scan": enable_deep,
-        "video_match_threshold": match_threshold
+        "video_match_threshold": match_threshold,
+        "video_max_workers": max_workers
     }
 
 
@@ -1859,12 +2133,24 @@ def interactive_main() -> None:
         # ---- Phase 1 ----
         if choice == "1":
             v_params = _get_video_params()
+            use_sub = v_params.get("use_organized_subfolder", True)
+            
+            # Safety: Force subfolder for Copy mode
+            if action == "copy" and not use_sub:
+                print("  [SAFETY] 'Copy' mode detected. Forcing '/Organized/' subfolder.")
+                use_sub = True
+                
+            org_root = root / ORGANIZED_DIR_NAME if use_sub else root
+            
             video_entries, remaining_files = phase1_video_sorting(
-                root, dry_run, action=action,
+                root, dry_run, org_root, action=action,
                 enable_deduplication=v_params["enable_video_deduplication"],
                 enable_perceptual=v_params["enable_perceptual_video_dedup"],
                 enable_deep=v_params["enable_deep_video_scan"],
-                video_match_threshold=v_params["video_match_threshold"]
+                video_match_threshold=v_params["video_match_threshold"],
+                max_workers=v_params["video_max_workers"],
+                dedup_priority=v_params.get("dedup_priority", "alphabetical"),
+                deployment_structure=v_params.get("deployment_structure", "structured")
             )
             all_entries.extend(video_entries)
 
@@ -1877,7 +2163,8 @@ def interactive_main() -> None:
                     if f.suffix.lower() not in VIDEO_EXTENSIONS
                 ]
             dup_entries, unique_images, hashes = phase2_deduplication(
-                root, remaining_files, dry_run, action=action
+                root, remaining_files, dry_run, org_root, action=action,
+                dedup_priority=v_params.get("dedup_priority", "alphabetical")
             )
             all_entries.extend(dup_entries)
             master_hash_map.update(hashes)
@@ -1895,7 +2182,7 @@ def interactive_main() -> None:
                 ]
             params = _get_cluster_params()
             clust_entries, _ = phase3_clustering(
-                root, unique_images, dry_run,
+                root, unique_images, dry_run, org_root,
                 action=action,
                 min_cluster_size=params["min_cluster_size"],
                 min_samples=params["min_samples"],
@@ -1913,6 +2200,11 @@ def interactive_main() -> None:
                 enable_color_features=params["enable_color_features"],
                 grid_detail=params["grid_detail"],
                 use_lab_space=params["use_lab_space"],
+                group_name_matches=params.get("group_name_matches", False),
+                group_name_prefix=params.get("group_name_prefix", False),
+                name_grouping_min_size=params.get("name_grouping_min_size", 2),
+                name_grouping_sensitivity=params.get("name_grouping_sensitivity", 0.5),
+                deployment_structure=params.get("deployment_structure", "structured"),
             )
             cluster_entries = clust_entries
             all_entries.extend(clust_entries)
@@ -1925,8 +2217,10 @@ def interactive_main() -> None:
                 unique_images = remaining_files
             
             rename_confirm = _prompt("  Rename with parent folder name? [Y/n]: ", "y").lower() == "y"
+            rs_choice = _prompt("  Rename Style [1] Folder - Name - 001  [2] Folder - 001: ", "1")
+            rs = "folder_name" if rs_choice == "1" else "folder_only"
             flat_entries, unique_images, flat_hashes = phase2b_folder_flattening(
-                root, unique_images, dry_run, action=action, rename=rename_confirm
+                root, unique_images, dry_run, org_root, action=action, rename=rename_confirm, rename_style=rs
             )
             all_entries.extend(flat_entries)
             master_hash_map.update(flat_hashes)
@@ -1935,21 +2229,22 @@ def interactive_main() -> None:
 
         # ---- Phase 4 ----
         elif choice == "4":
-            if cluster_entries is None or len(cluster_entries) == 0:
-                print("  ⚠  Phase 3 has not been run yet (no cluster entries).")
-                print("     Run Phase 3 first, or run All Phases.\n")
-                continue
-            cluster_entries = phase4_contextual_naming(
-                root, cluster_entries, dry_run
-            )
-            # Update the entries that were already added
-            # (replace the Phase 3 entries with renamed versions)
-            # Remove old phase-3 originals and add renamed ones
-            orig_paths = {e["Original_Path"] for e in cluster_entries}
-            all_entries = [
-                e for e in all_entries if e["Original_Path"] not in orig_paths
-            ]
-            all_entries.extend(cluster_entries)
+            if cluster_entries and not is_flattening:
+                rename_style = _prompt("  Rename Style [1] Folder - Name - 001  [2] Folder - 001: ", "1")
+                rs = "folder_name" if rename_style == "1" else "folder_only"
+                cluster_entries = phase4_contextual_naming(
+                    root, cluster_entries, dry_run, org_root, rename_style=rs
+                )
+                # Update the entries that were already added
+                # (replace the Phase 3 entries with renamed versions)
+                # Remove old phase-3 originals and add renamed ones
+                orig_paths = {e["Original_Path"] for e in cluster_entries}
+                all_entries = [
+                    e for e in all_entries if e["Original_Path"] not in orig_paths
+                ]
+                all_entries.extend(cluster_entries)
+            else:
+                print("  ⚠  Phase 3 has not been run yet (no cluster entries) or Flattening is active.")
 
         # ---- Phase 5 ----
         elif choice == "5":
@@ -1971,13 +2266,16 @@ def interactive_main() -> None:
                 enable_deduplication=v_params["enable_video_deduplication"],
                 enable_perceptual=v_params["enable_perceptual_video_dedup"],
                 enable_deep=v_params["enable_deep_video_scan"],
-                video_match_threshold=v_params["video_match_threshold"]
+                video_match_threshold=v_params["video_match_threshold"],
+                max_workers=v_params["video_max_workers"],
+                dedup_priority=v_params.get("dedup_priority", "alphabetical")
             )
             all_entries.extend(video_entries)
 
             # Phase 2
             dup_entries, unique_images, phase2_hashes = phase2_deduplication(
-                root, remaining_files, dry_run, action=action
+                root, remaining_files, dry_run, org_root, action=action,
+                dedup_priority=v_params.get("dedup_priority", "alphabetical")
             )
             all_entries.extend(dup_entries)
             master_hash_map.update(phase2_hashes)
@@ -1986,8 +2284,10 @@ def interactive_main() -> None:
             is_flat = False
             if enable_flat:
                 rename_flat = _prompt("  Rename with parent folder name? [Y/n]: ", "y").lower() == "y"
+                rs_choice_flat = _prompt("  Rename Style [1] Folder - Name - 001  [2] Folder - 001: ", "1")
+                rs_flat = "folder_name" if rs_choice_flat == "1" else "folder_only"
                 flat_entries, unique_images, f_hashes = phase2b_folder_flattening(
-                    root, unique_images, dry_run, action=action, rename=rename_flat
+                    root, unique_images, dry_run, org_root, action=action, rename=rename_flat, rename_style=rs_flat
                 )
                 all_entries.extend(flat_entries)
                 master_hash_map.update(f_hashes)
@@ -1997,11 +2297,10 @@ def interactive_main() -> None:
 
             # Phase 3
             clust_entries = []
-            if is_flat:
-                log.info("[SKIP] Phase 3: AI Clustering skipped due to Flattening.")
-            elif params.get("enable_ai_clustering", True) or params.get("enable_color_features", True):
+            # Modified: Even if is_flat, we still check for Name Grouping (Smart Flattening)
+            if not is_flat and (params.get("enable_ai_clustering", True) or params.get("enable_color_features", True)):
                 clust_entries, _ = phase3_clustering(
-                    root, unique_images, dry_run,
+                    root, unique_images, dry_run, org_root,
                     action=action,
                     min_cluster_size=params.get("min_cluster_size", 3),
                     min_samples=params.get("min_samples"),
@@ -2009,7 +2308,7 @@ def interactive_main() -> None:
                     cluster_selection_method=params.get("method", "leaf"),
                     similarity_sensitivity=params.get("similarity_sensitivity"),
                     temporal_weight=params.get("temporal_weight", 0.3),
-                    use_feature_cache=True,
+                    force_rescan=False,
                     hash_map=master_hash_map,
                     filename_weight=params.get("filename_weight", 0.0),
                     color_weight=params.get("color_weight", 0.0),
@@ -2018,15 +2317,27 @@ def interactive_main() -> None:
                     enable_color_features=params.get("enable_color_features", True),
                     grid_detail=params.get("grid_detail", 16),
                     use_lab_space=params.get("use_lab_space", True),
+                    group_name_matches=params.get("group_name_matches", False),
+                    group_name_prefix=params.get("group_name_prefix", False),
+                    name_grouping_min_size=params.get("name_grouping_min_size", 2),
+                    name_grouping_sensitivity=params.get("name_grouping_sensitivity", 0.5),
+                    deployment_structure=params.get("deployment_structure", "structured"),
                 )
             elif params.get("group_name_matches", False) or params.get("group_name_prefix", False):
-                log.info("[INFO] AI Clustering disabled, but Name Grouping is enabled. Running standalone.")
+                # Smart Flattening path or Standalone Grouping
+                prefix = "[SMART FLATTEN] " if is_flat else "[INFO] "
+                log.info("%sName Grouping is enabled. Running heuristic scan.", prefix)
                 clust_entries, _ = phase3_standalone_grouping(
-                    root, unique_images, dry_run,
+                    root, unique_images, dry_run, org_root,
                     action=action,
                     group_name_matches=params.get("group_name_matches", False),
                     group_name_prefix=params.get("group_name_prefix", False),
+                    name_grouping_min_size=params.get("name_grouping_min_size", 2),
+                    name_grouping_sensitivity=params.get("name_grouping_sensitivity", 0.5),
+                    deployment_structure=params.get("deployment_structure", "structured"),
                 )
+            elif is_flat:
+                log.info("[SKIP] Phase 3: AI Clustering and Name Grouping skipped (Flattening Only).")
             else:
                 log.info("[SKIP] Phase 3: AI Clustering and Name Grouping disabled.")
             
@@ -2034,8 +2345,10 @@ def interactive_main() -> None:
 
             # Phase 4
             if not is_flat and cluster_entries:
+                rename_style_choice = _prompt("  Rename Style [1] Folder - Name - 001  [2] Folder - 001: ", "1")
+                rs = "folder_name" if rename_style_choice == "1" else "folder_only"
                 cluster_entries = phase4_contextual_naming(
-                    root, cluster_entries, dry_run
+                    root, cluster_entries, dry_run, org_root, rename_style=rs
                 )
                 all_entries.extend(cluster_entries)
 
@@ -2124,6 +2437,8 @@ def main() -> None:
                         help="Root directory containing disorganized media.")
     parser.add_argument("--interactive", action="store_true", default=False,
                         help="Force interactive menu mode.")
+    parser.add_argument("--commit-log", type=Path, default=None,
+                        help="Execute file operations from a previously generated log (bypasses all phases).")
 
     # Auto-generate all tuning args from PARAM_SCHEMA
     for p in PARAM_SCHEMA:
@@ -2140,6 +2455,15 @@ def main() -> None:
         parser.add_argument(p["cli"], **kwargs)
 
     args = parser.parse_args()
+
+    # --- Commit from Log mode (fast path) ---
+    if args.commit_log is not None:
+        log_file = Path(args.commit_log)
+        if not log_file.is_absolute():
+            log_file = Path(__file__).parent / log_file
+        print("[STARTUP] Commit-from-Log mode", flush=True)
+        commit_from_log(log_file)
+        return
 
     # If no --root supplied, or --interactive flag is set, launch the menu
     if args.root is None or args.interactive:
@@ -2173,16 +2497,35 @@ def main() -> None:
     cluster_entries: list[dict] = []
     cluster_map: dict[int, list[Path]] = {}
 
+    # Global Org Root logic
+    use_sub = _arg("use_organized_subfolder")
+    
+    # Safety: If action is 'copy', we MUST use an organized subfolder to avoid root clutter
+    if _arg("action") == "copy" and not use_sub:
+        log.info("[SAFETY] 'Copy' mode detected. Forcing use of '/Organized/' subfolder to prevent root clutter.")
+        use_sub = True
+
+    org_root = root / ORGANIZED_DIR_NAME if use_sub else root
+
+    if not use_sub:
+        log.warning("!")
+        log.warning("!!! CAUTION: Base Root Organization active. Files will be dumped DIRECTLY into: %s", root)
+        log.warning("!!! This makes 'Undo' difficult. Ensure you are using --action copy for safety.")
+        log.warning("!")
+
     # Phase 1
     video_entries = []
     remaining_files = []
     if _arg("enable_video_sorting"):
         video_entries, remaining_files = phase1_video_sorting(
-            root, _arg("dry_run"), action=_arg("action"), 
+            root, _arg("dry_run"), org_root, action=_arg("action"), 
             enable_deduplication=_arg("enable_video_deduplication"),
             enable_perceptual=_arg("enable_perceptual_video_dedup"),
             enable_deep=_arg("enable_deep_video_scan"),
-            video_match_threshold=_arg("video_match_threshold")
+            video_match_threshold=_arg("video_match_threshold"),
+            max_workers=_arg("video_max_workers"),
+            dedup_priority=_arg("dedup_priority"),
+            deployment_structure=_arg("deployment_structure")
         )
         all_entries.extend(video_entries)
     else:
@@ -2196,7 +2539,8 @@ def main() -> None:
     master_hash_map = {}
     if _arg("enable_deduplication"):
         dup_entries, unique_images, master_hash_map = phase2_deduplication(
-            root, remaining_files, _arg("dry_run"), action=_arg("action")
+            root, remaining_files, _arg("dry_run"), org_root, action=_arg("action"),
+            dedup_priority=_arg("dedup_priority")
         )
         all_entries.extend(dup_entries)
     else:
@@ -2209,8 +2553,10 @@ def main() -> None:
             root,
             unique_images,
             _arg("dry_run"),
+            org_root,
             action=_arg("action"),
             rename=_arg("flatten_rename"),
+            rename_style=_arg("rename_style"),
         )
         all_entries.extend(flatten_entries)
         master_hash_map.update(flatten_hashes)
@@ -2227,6 +2573,7 @@ def main() -> None:
             root,
             unique_images,
             _arg("dry_run"),
+            org_root,
             action=_arg("action"),
             min_cluster_size=_arg("min_cluster_size"),
             min_samples=_arg("min_samples"),
@@ -2240,8 +2587,10 @@ def main() -> None:
             visual_weight=_arg("visual_weight"),
             group_name_matches=_arg("group_name_matches"),
             group_name_prefix=_arg("group_name_prefix"),
+            name_grouping_min_size=_arg("name_grouping_min_size"),
+            name_grouping_sensitivity=_arg("name_grouping_sensitivity"),
             ai_clustering_mode=_arg("ai_clustering_mode"),
-            use_feature_cache=_arg("use_feature_cache"),
+            force_rescan=_arg("force_rescan"),
             hash_map=master_hash_map,
             enable_color_features=_arg("enable_color_features"),
             grid_detail=_arg("grid_detail"),
@@ -2256,13 +2605,17 @@ def main() -> None:
             action=_arg("action"),
             group_name_matches=_arg("group_name_matches"),
             group_name_prefix=_arg("group_name_prefix"),
+            name_grouping_min_size=_arg("name_grouping_min_size"),
+            name_grouping_sensitivity=_arg("name_grouping_sensitivity"),
         )
     else:
         log.info("[SKIP] Phase 3 & 3b: AI Clustering and Name Grouping disabled.")
 
     # Phase 4 (Contextual Naming — applies to both AI or name-based clusters)
     if not is_flattening and cluster_entries:
-        cluster_entries = phase4_contextual_naming(root, cluster_entries, _arg("dry_run"))
+        cluster_entries = phase4_contextual_naming(
+            root, cluster_entries, _arg("dry_run"), org_root, rename_style=_arg("rename_style")
+        )
         all_entries.extend(cluster_entries)
 
     # Phase 5 — auto-generate run_settings from schema
