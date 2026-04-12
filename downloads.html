@@ -158,8 +158,13 @@
                 return () => clearInterval(interval);
             }, []);
 
-            const startDownload = async () => {
+            const startDownload = async (force = false) => {
                 if (!urls.trim() || isRunning) return;
+                
+                if (force && !confirm("DEEP SCAN PROTOCOL: This will ignore the download archive and try to re-download every file, potentially creating duplicates. Proceed?")) {
+                    return;
+                }
+
                 const urlList = urls.split('\n').map(u => u.trim()).filter(u => u);
                 if (urlList.length === 0) return;
 
@@ -168,7 +173,7 @@
                     const res = await fetch(`${serverUrl}/api/downloads/run`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ urls: urlList })
+                        body: JSON.stringify({ urls: urlList, force })
                     });
                     if (!res.ok) {
                         const err = await res.json();
@@ -178,6 +183,20 @@
                 } catch (e) {
                     alert("Connection error");
                     setIsRunning(false);
+                }
+            };
+
+            const stopDownload = async () => {
+                if (!isRunning) return;
+                try {
+                    await fetch(`${serverUrl}/api/downloads/status`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ running: false })
+                    });
+                    setIsRunning(false);
+                } catch (e) {
+                    alert("Stop request failed");
                 }
             };
 
@@ -250,9 +269,26 @@
                             
                             <div className="flex items-center gap-3 pl-6 border-l border-white/10">
                                 {isRunning ? (
-                                    <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/20">
-                                        <div className="w-2 h-2 rounded-full bg-emerald-500 status-pulse"></div>
-                                        <span className="text-[10px] font-black text-emerald-500 uppercase tracking-widest">Active</span>
+                                    <div className="flex items-center gap-2">
+                                        <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/20">
+                                            <div className="w-2 h-2 rounded-full bg-emerald-500 status-pulse"></div>
+                                            <span className="text-[10px] font-black text-emerald-500 uppercase tracking-widest">
+                                                {(() => {
+                                                    const progressLine = [...log].reverse().find(l => l.includes('[GDL] ['));
+                                                    if (progressLine) {
+                                                        const match = progressLine.match(/\[(\d+\/\d+)\]/);
+                                                        return match ? `Downloading ${match[1]}` : 'Active';
+                                                    }
+                                                    return 'Active';
+                                                })()}
+                                            </span>
+                                        </div>
+                                        <button 
+                                            onClick={stopDownload}
+                                            className="px-3 py-1.5 rounded-full bg-rose-500/10 border border-rose-500/20 text-rose-500 text-[10px] font-black uppercase tracking-widest hover:bg-rose-500 hover:text-white transition-all"
+                                        >
+                                            Stop
+                                        </button>
                                     </div>
                                 ) : (
                                     <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-800 border border-white/5">
@@ -325,40 +361,55 @@
                                                             <p className="text-[10px] uppercase font-black tracking-widest">No History Stored</p>
                                                         </div>
                                                     )}
-                                                    {history.map((entry, idx) => (
-                                                        <div key={idx} className="p-4 bg-white/5 rounded-2xl border border-white/5 hover:border-emerald-500/20 transition-all group/item">
-                                                            <div className="flex justify-between items-start mb-2">
-                                                                <span className="text-[9px] font-bold text-slate-500">{entry.timestamp}</span>
-                                                                <span className={`text-[9px] font-black px-2 py-0.5 rounded-full ${entry.status === 'Finished' ? 'bg-emerald-500/10 text-emerald-500' : 'bg-rose-500/10 text-rose-500'}`}>
-                                                                    {entry.count} Files
-                                                                </span>
+                                                    {history.map((entry, idx) => {
+                                                        const isError = entry.status && entry.status.includes('Error');
+                                                        return (
+                                                            <div key={idx} className={`p-4 bg-white/5 rounded-2xl border transition-all group/item ${isError ? 'border-rose-500/20 bg-rose-500/5' : 'border-white/5 hover:border-emerald-500/20'}`}>
+                                                                <div className="flex justify-between items-start mb-2">
+                                                                    <span className="text-[9px] font-bold text-slate-500">{entry.timestamp}</span>
+                                                                    <span className={`text-[9px] font-black px-2 py-0.5 rounded-full ${isError ? 'bg-rose-500/20 text-rose-500 shadow-lg shadow-rose-500/10 animate-pulse' : 'bg-emerald-500/10 text-emerald-500'}`}>
+                                                                        {isError ? 'FAILED' : `${entry.count} Files`}
+                                                                    </span>
+                                                                </div>
+                                                                <div className={`text-[10px] line-clamp-2 font-mono mb-3 opacity-70 ${isError ? 'text-rose-300' : 'text-slate-300'}`}>
+                                                                    {entry.urls.join(', ')}
+                                                                </div>
+                                                                <div className="flex gap-2">
+                                                                    <button
+                                                                        onClick={() => {
+                                                                            setUrls(entry.urls.join('\n'));
+                                                                            setLeftTab('queue');
+                                                                        }}
+                                                                        className={`flex-1 py-2 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all ${isError ? 'bg-rose-600 hover:bg-rose-500 text-white' : 'bg-slate-800 hover:bg-emerald-500 text-slate-400 hover:text-white'}`}
+                                                                    >
+                                                                        {isError ? 'Retry Link' : 'Re-queue Link'}
+                                                                    </button>
+                                                                </div>
                                                             </div>
-                                                            <div className="text-[10px] text-slate-300 line-clamp-2 font-mono mb-3 opacity-70">
-                                                                {entry.urls.join(', ')}
-                                                            </div>
-                                                            <button
-                                                                onClick={() => {
-                                                                    setUrls(entry.urls.join('\n'));
-                                                                    setLeftTab('queue');
-                                                                }}
-                                                                className="w-full py-2 bg-slate-800 hover:bg-emerald-500 text-slate-400 hover:text-white rounded-lg text-[9px] font-black uppercase tracking-widest transition-all"
-                                                            >
-                                                                Re-queue Links
-                                                            </button>
-                                                        </div>
-                                                    ))}
+                                                        );
+                                                    })}
                                                 </div>
                                             </div>
                                         )}
 
-                                        <button
-                                            onClick={startDownload}
-                                            disabled={isRunning || !urls.trim()}
-                                            className={`w-full py-4 rounded-2xl font-black text-sm uppercase tracking-[0.2em] transition-all flex items-center justify-center gap-3 ${isRunning || !urls.trim() || leftTab === 'history' ? 'bg-slate-800 text-slate-600' : 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-xl shadow-emerald-900/20 hover:scale-[1.02] active:scale-[0.98]'}`}
-                                        >
-                                            <LucideIcon name={isRunning ? 'loader-2' : 'play-circle'} className={`w-5 h-5 ${isRunning ? 'animate-spin' : ''}`} />
-                                            {isRunning ? 'Processing...' : 'Engage Sequential Download'}
-                                        </button>
+                                        <div className="flex gap-2">
+                                            <button
+                                                onClick={() => startDownload(false)}
+                                                disabled={isRunning || !urls.trim()}
+                                                className={`flex-[2] py-4 rounded-2xl font-black text-xs uppercase tracking-[0.2em] transition-all flex items-center justify-center gap-3 ${isRunning || !urls.trim() || leftTab === 'history' ? 'bg-slate-800 text-slate-600' : 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-xl shadow-emerald-900/20 hover:scale-[1.02] active:scale-[0.98]'}`}
+                                            >
+                                                <LucideIcon name={isRunning ? 'loader-2' : 'play-circle'} className={`w-5 h-5 ${isRunning ? 'animate-spin' : ''}`} />
+                                                {isRunning ? 'Processing...' : 'Engage'}
+                                            </button>
+                                            <button
+                                                onClick={() => startDownload(true)}
+                                                disabled={isRunning || !urls.trim()}
+                                                className={`flex-1 py-4 rounded-2xl font-black text-[9px] uppercase tracking-widest transition-all border ${isRunning || !urls.trim() || leftTab === 'history' ? 'bg-slate-900/40 border-slate-800 text-slate-700' : 'bg-rose-500/10 border-rose-500/30 text-rose-500 hover:bg-rose-500 hover:text-white shadow-lg shadow-rose-900/10'}`}
+                                                title="Force re-scan and ignore archive"
+                                            >
+                                                Force
+                                            </button>
+                                        </div>
                                     </div>
 
                                     {/* Sub-card: Pro Tip */}

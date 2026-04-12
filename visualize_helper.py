@@ -218,6 +218,19 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                     self.send_json(500, {"error": str(e)})
                 except: pass
 
+        elif self.path == '/api/downloads/status':
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                data = json.loads(post_data)
+                if data.get('running') == False:
+                    DOWNLOAD_IS_RUNNING = False
+                    self.send_json(200, {"status": "stopping_requested"})
+                else:
+                    self.send_json(400, {"error": "Invalid request"})
+            except Exception as e:
+                self.send_json(500, {"error": str(e)})
+
         elif self.path == '/api/browse_logs':
             try:
                 log_dir = SCRIPT_DIR / "logs"
@@ -659,6 +672,7 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
             try:
                 params = json.loads(post_data)
                 urls = params.get('urls', [])
+                force = params.get('force', False)
                 if not urls:
                     self.send_json(400, {"error": "No URLs provided"})
                     return
@@ -671,76 +685,105 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                 else:
                     gdl_cmd = ["gallery-dl"]
 
-                cmd = gdl_cmd + ["-c", "gallery-dl.conf"] + urls
-                
                 DOWNLOAD_IS_RUNNING = True
-                DOWNLOAD_LOG = [f"[GDL] Starting download for {len(urls)} items..."]
-                start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                msg = "[GDL] Starting sequential download batch"
+                if force:
+                    msg += " (FORCE MODE ENABLED)"
+                DOWNLOAD_LOG = [f"{msg} ({len(urls)} items)..."]
                 
                 def run_gdl():
                     global DOWNLOAD_IS_RUNNING, DOWNLOAD_LOG
-                    file_count = 0
+                    import time
+                    
                     try:
                         env = os.environ.copy()
                         env["PYTHONUNBUFFERED"] = "1"
                         
-                        process = subprocess.Popen(
-                            cmd,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,
-                            bufsize=0,
-                            env=env,
-                            cwd=str(SCRIPT_DIR)
-                        )
-                        
-                        line_buffer = b''
-                        while True:
-                            chunk = process.stdout.read1(4096) if hasattr(process.stdout, 'read1') else process.stdout.read(1)
-                            if not chunk: break
-                            line_buffer += chunk
-                            while b'\n' in line_buffer or b'\r' in line_buffer:
-                                n_pos = line_buffer.find(b'\n')
-                                r_pos = line_buffer.find(b'\r')
-                                split_pos = min(n_pos, r_pos) if n_pos != -1 and r_pos != -1 else (n_pos if r_pos == -1 else r_pos)
-                                raw_line = line_buffer[:split_pos]
-                                if split_pos + 1 < len(line_buffer) and line_buffer[split_pos:split_pos+2] == b'\r\n':
-                                    line_buffer = line_buffer[split_pos+2:]
-                                else:
-                                    line_buffer = line_buffer[split_pos+1:]
-                                try:
-                                    line = raw_line.decode('utf-8', errors='replace').strip()
-                                except:
-                                    line = str(raw_line)
-                                if line:
-                                    DOWNLOAD_LOG.append(line)
-                                    # Very simple detection: if it doesn't start with [ and looks like a path/filename
-                                    if not line.startswith('[') and ('.' in line or '/' in line or '\\' in line):
-                                        file_count += 1
-                        
-                        process.wait()
-                        DOWNLOAD_LOG.append(f"[GDL] Finished with code {process.returncode}")
-                        
-                        # Save to history
-                        try:
-                            history = []
-                            if DOWNLOAD_HISTORY_FILE.exists():
-                                with open(DOWNLOAD_HISTORY_FILE, "r", encoding="utf-8") as f:
-                                    history = json.load(f)
-                            history.insert(0, {
-                                "timestamp": start_time,
-                                "urls": urls,
-                                "count": file_count,
-                                "status": "Finished" if process.returncode == 0 else f"Error ({process.returncode})"
-                            })
-                            # Keep only last 100 entries
-                            history = history[:100]
-                            with open(DOWNLOAD_HISTORY_FILE, "w", encoding="utf-8") as f:
-                                json.dump(history, f, indent=2)
-                        except Exception as hist_e:
-                            print(f"[GDL] History error: {hist_e}")
+                        for idx, url in enumerate(urls):
+                            if not DOWNLOAD_IS_RUNNING:
+                                DOWNLOAD_LOG.append("[GDL] Batch process aborted by user.")
+                                break
+                                
+                            start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            DOWNLOAD_LOG.append(f"\n[GDL] [{idx+1}/{len(urls)}] Processing: {url}")
+                            file_count = 0
+                            
+                            current_cmd = gdl_cmd + ["-c", "gallery-dl.conf"]
+                            if force:
+                                current_cmd += ["--download-archive", "", "-o", "skip=false"]
+                            current_cmd.append(url)
+                            
+                            process = subprocess.Popen(
+                                current_cmd,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT,
+                                bufsize=0,
+                                env=env,
+                                cwd=str(SCRIPT_DIR)
+                            )
+                            
+                            line_buffer = b''
+                            while True:
+                                # Small check to see if we should kill the process mid-stream
+                                if not DOWNLOAD_IS_RUNNING:
+                                    process.terminate()
+                                    DOWNLOAD_LOG.append(f"[GDL] Terminating current download...")
+                                    break
+                                    
+                                chunk = process.stdout.read1(4096) if hasattr(process.stdout, 'read1') else process.stdout.read(1)
+                                if not chunk: break
+                                line_buffer += chunk
+                                while b'\n' in line_buffer or b'\r' in line_buffer:
+                                    n_pos = line_buffer.find(b'\n')
+                                    r_pos = line_buffer.find(b'\r')
+                                    split_pos = min(n_pos, r_pos) if n_pos != -1 and r_pos != -1 else (n_pos if r_pos == -1 else r_pos)
+                                    raw_line = line_buffer[:split_pos]
+                                    if split_pos + 1 < len(line_buffer) and line_buffer[split_pos:split_pos+2] == b'\r\n':
+                                        line_buffer = line_buffer[split_pos+2:]
+                                    else:
+                                        line_buffer = line_buffer[split_pos+1:]
+                                    try:
+                                        line = raw_line.decode('utf-8', errors='replace').strip()
+                                    except:
+                                        line = str(raw_line)
+                                    if line:
+                                        DOWNLOAD_LOG.append(line)
+                                        if not line.startswith('[') and ('.' in line or '/' in line or '\\' in line):
+                                            file_count += 1
+                            
+                            process.wait()
+                            
+                            # Update History immediately for this link
+                            try:
+                                history = []
+                                if DOWNLOAD_HISTORY_FILE.exists():
+                                    with open(DOWNLOAD_HISTORY_FILE, "r", encoding="utf-8") as f:
+                                        history = json.load(f)
+                                
+                                # Move to top or insert
+                                normalized_current = sorted([url])
+                                history = [h for h in history if sorted(h.get('urls', [])) != normalized_current]
+                                
+                                history.insert(0, {
+                                    "timestamp": start_time,
+                                    "urls": [url],
+                                    "count": file_count,
+                                    "status": "Finished" if process.returncode == 0 else f"Error ({process.returncode})"
+                                })
+                                history = history[:100]
+                                with open(DOWNLOAD_HISTORY_FILE, "w", encoding="utf-8") as f:
+                                    json.dump(history, f, indent=2)
+                            except Exception as hist_e:
+                                print(f"[GDL] History update error: {hist_e}")
+
+                            if idx < len(urls) - 1 and DOWNLOAD_IS_RUNNING:
+                                DOWNLOAD_LOG.append("[GDL] Cooling down for 5 seconds...")
+                                time.sleep(5)
+                                
+                        DOWNLOAD_LOG.append("\n[GDL] Batch sequence complete.")
 
                     except Exception as e:
-                        DOWNLOAD_LOG.append(f"[GDL] Error: {e}")
+                        DOWNLOAD_LOG.append(f"[GDL] Fatal Error: {e}")
                     finally:
                         DOWNLOAD_IS_RUNNING = False
 
