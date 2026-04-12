@@ -119,7 +119,7 @@
             return <span ref={iconRef} className="inline-flex items-center justify-center"></span>;
         };
 
-        const MediaCard = ({ item, getImageUrl, onImageClick }) => {
+        const MediaCard = ({ item, getImageUrl, onImageClick, virtualPath }) => {
             const [hasError, setHasError] = useState(false);
             const [retryCount, setRetryCount] = useState(0);
             const imageUrl = getImageUrl(item);
@@ -190,7 +190,11 @@
                         </div>
                     </div>
                     <div className="px-2">
-                        <h4 className="text-[11px] font-black text-slate-400 truncate mb-1">{item.New_Filename || item.Filename || "unnamed_source"}</h4>
+                        <h4 className="text-[11px] font-black text-slate-400 truncate mb-0.5">{item.New_Filename || item.Filename || "unnamed_source"}</h4>
+                        <div className="flex items-center gap-1.5 mb-1.5 opacity-60">
+                            <LucideIcon name="folder-output" className="w-2.5 h-2.5 text-amber-500" />
+                            <span className="text-[9px] font-mono text-amber-500 truncate" title={`Destination: ${virtualPath}`}>{virtualPath}</span>
+                        </div>
                         <p className="text-[9px] font-bold text-slate-600 leading-tight line-clamp-2 italic">{item.Reason || "No diagnostic info available"}</p>
                     </div>
                 </div>
@@ -335,6 +339,13 @@
             const [isCleaning, setIsCleaning] = useState(false);
             const [logFilename, setLogFilename] = useState("");
             const [showCommitConfirm, setShowCommitConfirm] = useState(false);
+            const [batchQueue, setBatchQueue] = useState([]);
+            const [batchIndex, setBatchIndex] = useState(-1);
+            const [batchTotal, setBatchTotal] = useState(0);
+            const [batchCurrentPath, setBatchCurrentPath] = useState("");
+
+            // Detect if the source folder input contains a .txt file path
+            const isQueueMode = organizedPath.trim().toLowerCase().endsWith('.txt');
 
             const groups = useMemo(() => {
                 const g = {};
@@ -581,6 +592,59 @@
                     return next;
                 });
             };
+
+            // Calculate a "Virtual Path" for UI preview based on current parameters
+            const getVirtualPath = useCallback((row) => {
+                if (!row) return "";
+                
+                const clusterId = row.Cluster_ID || "noise";
+                const mediaType = (row.Media_Type || "").toLowerCase();
+                const isDeduplicationActive = enabledPlugins['enable_deduplication'] !== false;
+                const isAiActive = enabledPlugins['enable_ai_clustering'] !== false;
+                const isVideoSortingActive = enabledPlugins['enable_video_sorting'] !== false;
+
+                // Detect states from current log entries
+                const rawNewPath = (row.New_Path || row.Destination_Path || "").replace("[DRY RUN] ", "").replace(/\\/g, "/");
+                const isPreviouslyDuplicate = rawNewPath.toLowerCase().includes("/duplicates/");
+                const isPreviouslyReview = rawNewPath.toLowerCase().includes("/review_needed/") || row.Review_Needed === "True";
+                const orientation = rawNewPath.toLowerCase().includes("/videos/vertical/") ? "vertical" : "horizontal";
+
+                // Base root determination
+                let base = aiParams.use_organized_subfolder ? "Organized" : "";
+                
+                // Priority paths
+                if (isPreviouslyDuplicate && isDeduplicationActive) return base ? `${base}/duplicates` : "duplicates";
+                if (isPreviouslyReview) return base ? `${base}/review_needed` : "review_needed";
+
+                // Flat Structure
+                if (aiParams.deployment_structure === 'flat') {
+                    return base || ".";
+                }
+
+                // Structured Layout
+                let segments = [];
+                if (base) segments.push(base);
+
+                if (mediaType === 'video') {
+                    if (isVideoSortingActive) {
+                        segments.push("videos");
+                        segments.push(orientation);
+                    } else {
+                        segments.push("videos");
+                    }
+                } else if (isAiActive) {
+                    if (clusterId === "noise" || clusterId === "unknown") {
+                        segments.push("unsorted");
+                    } else {
+                        segments.push("groups");
+                        segments.push(clusterId);
+                    }
+                } else {
+                    segments.push("unsorted");
+                }
+
+                return segments.join("/");
+            }, [aiParams.deployment_structure, aiParams.use_organized_subfolder, enabledPlugins]);
 
             // Generic control renderer based on schema entry
             const renderParamControl = (p) => {
@@ -955,11 +1019,213 @@
                 }
             };
 
+            // ---- Batch Queue Logic ----
+            const startBatchQueue = async (dryRun = true) => {
+                if (isRunning || !isQueueMode) return;
+
+                const txtPath = organizedPath.trim();
+                setIsConsoleExpanded(true);
+                const modeLabel = dryRun ? 'SIMULATE' : 'COMMIT';
+                setProgressLog([`[QUEUE] Loading batch file: ${txtPath}`, `[QUEUE] Mode: ${modeLabel}`]);
+
+                try {
+                    // Fetch the .txt file contents via the absolute path server
+                    const absPath = txtPath.replace(/\\/g, "/");
+                    const res = await fetch(`${serverUrl}/_abs/${encodeURIComponent(absPath)}`);
+                    if (!res.ok) {
+                        alert(`Could not read batch file: ${txtPath}`);
+                        return;
+                    }
+                    const rawText = await res.text();
+
+                    // Parse: one path per line, strip comments (#) and empty lines
+                    const paths = rawText
+                        .split(/\r?\n/)
+                        .map(line => line.trim())
+                        .filter(line => line && !line.startsWith('#'));
+
+                    if (paths.length === 0) {
+                        alert("Batch file is empty or contains no valid paths.");
+                        return;
+                    }
+
+                    setProgressLog(prev => [...prev,
+                        `[QUEUE] Found ${paths.length} folder(s) to process:`,
+                        ...paths.map((p, i) => `  ${i + 1}. ${p}`)
+                    ]);
+
+                    setBatchQueue(paths);
+                    setBatchTotal(paths.length);
+                    setBatchIndex(0);
+
+                    // Start processing the first item
+                    await runBatchItem(paths, 0, dryRun);
+                } catch (e) {
+                    console.error("Batch load error:", e);
+                    alert("Failed to load batch file: " + e.message);
+                }
+            };
+
+            const runBatchItem = async (queue, index, dryRun = true) => {
+                if (index >= queue.length) {
+                    // All done
+                    setBatchIndex(-1);
+                    setBatchCurrentPath("");
+                    setIsRunning(false);
+                    const modeLabel = dryRun ? 'SIMULATED' : 'COMMITTED';
+                    setProgressLog(prev => [...prev,
+                        "",
+                        "=" .repeat(60),
+                        `[QUEUE] BATCH ${modeLabel} - ${queue.length} folder(s) processed.`,
+                        "=" .repeat(60)
+                    ]);
+                    return;
+                }
+
+                const folderPath = queue[index];
+                setBatchIndex(index);
+                setBatchCurrentPath(folderPath);
+                setIsRunning(true);
+
+                setProgressLog(prev => [...prev,
+                    "",
+                    "-".repeat(60),
+                    `[QUEUE] (${index + 1}/${queue.length}) ${dryRun ? 'Simulating' : 'Committing'}: ${folderPath}`,
+                    "-".repeat(60)
+                ]);
+
+                // 1. Sync the backend root to this folder
+                try {
+                    const rootRes = await fetch(`${serverUrl}/api/set_root`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ path: folderPath })
+                    });
+                    if (!rootRes.ok) {
+                        setProgressLog(prev => [...prev, `[QUEUE] ERROR: Could not set root to "${folderPath}". Skipping.`]);
+                        await runBatchItem(queue, index + 1, dryRun);
+                        return;
+                    }
+                } catch (e) {
+                    setProgressLog(prev => [...prev, `[QUEUE] ERROR: Connection failed for "${folderPath}". Skipping.`]);
+                    await runBatchItem(queue, index + 1, dryRun);
+                    return;
+                }
+
+                // 2. Build params (same as runOrganizer)
+                const finalParams = { ...aiParams, dry_run: dryRun };
+                paramSchema.forEach(p => {
+                    if (p.is_plugin) {
+                        const isEnabled = enabledPlugins[p.key] !== false;
+                        if (p.type === 'bool') {
+                            finalParams[p.key] = isEnabled;
+                        } else if (!isEnabled) {
+                            finalParams[p.key] = 0;
+                        }
+                    }
+                });
+
+                // 3. Fire the run
+                try {
+                    const runRes = await fetch(`${serverUrl}/api/run`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(finalParams)
+                    });
+                    if (!runRes.ok) {
+                        setProgressLog(prev => [...prev, `[QUEUE] ERROR: Run failed for "${folderPath}". Skipping.`]);
+                        await runBatchItem(queue, index + 1, dryRun);
+                        return;
+                    }
+                } catch (e) {
+                    setProgressLog(prev => [...prev, `[QUEUE] ERROR: Run request failed for "${folderPath}". Skipping.`]);
+                    await runBatchItem(queue, index + 1, dryRun);
+                    return;
+                }
+
+                // 4. Poll for completion, then advance to next
+                const poll = setInterval(async () => {
+                    try {
+                        const progRes = await fetch(`${serverUrl}/api/progress`);
+                        if (progRes.ok) {
+                            const progData = await progRes.json();
+                            // Merge queue-level context with live process output
+                            if (progData.log && progData.log.length > 0) {
+                                setProgressLog(prev => {
+                                    // Keep queue header lines, replace process lines
+                                    const queueLines = prev.filter(l => l.startsWith('[QUEUE]') || l.startsWith('  ') || l.startsWith('-') || l.startsWith('='));
+                                    return [...queueLines, ...progData.log];
+                                });
+                            }
+                            if (!progData.running) {
+                                clearInterval(poll);
+                                setProgressLog(prev => [...prev, `[QUEUE] (${index + 1}/${queue.length}) Finished: ${folderPath}`]);
+                                // Advance to next
+                                await runBatchItem(queue, index + 1, dryRun);
+                            }
+                        }
+                    } catch (e) {
+                        clearInterval(poll);
+                        setProgressLog(prev => [...prev, `[QUEUE] ERROR: Lost connection during "${folderPath}". Stopping.`]);
+                        setBatchIndex(-1);
+                        setIsRunning(false);
+                    }
+                }, 1500);
+            };
+
             const cleanupEmptyDirs = async () => {
                 if (isCleaning || isRunning) return;
                 
                 setIsCleaning(true);
                 setIsConsoleExpanded(true);
+
+                // If in queue mode, iterate through all folders in the .txt file
+                if (isQueueMode) {
+                    setProgressLog(prev => [...prev.slice(-50), `[CLEANUP] Batch mode: loading queue file...`]);
+                    try {
+                        const absPath = organizedPath.trim().replace(/\\/g, "/");
+                        const res = await fetch(`${serverUrl}/_abs/${encodeURIComponent(absPath)}`);
+                        if (!res.ok) { alert("Could not read batch file."); setIsCleaning(false); return; }
+                        const rawText = await res.text();
+                        const paths = rawText.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+
+                        let totalDeleted = 0;
+                        for (let i = 0; i < paths.length; i++) {
+                            setProgressLog(prev => [...prev, `[CLEANUP] (${i + 1}/${paths.length}) Scanning: ${paths[i]}`]);
+                            try {
+                                const cleanRes = await fetch(`${serverUrl}/api/cleanup_for_root`, {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ root: paths[i] })
+                                });
+                                const result = await cleanRes.json();
+                                if (cleanRes.ok) {
+                                    totalDeleted += result.count;
+                                    if (result.count > 0) {
+                                        setProgressLog(prev => [...prev,
+                                            `  Removed ${result.count} empty dir(s).`,
+                                            ...result.deleted.map(d => `    - ${d}`)
+                                        ]);
+                                    } else {
+                                        setProgressLog(prev => [...prev, `  No empty directories.`]);
+                                    }
+                                } else {
+                                    setProgressLog(prev => [...prev, `  ERROR: ${result.error}`]);
+                                }
+                            } catch (e) {
+                                setProgressLog(prev => [...prev, `  ERROR: Connection failed for ${paths[i]}`]);
+                            }
+                        }
+                        setProgressLog(prev => [...prev, `[CLEANUP] Batch complete: ${totalDeleted} total empty directories removed across ${paths.length} folder(s).`]);
+                    } catch (e) {
+                        setProgressLog(prev => [...prev, `[CLEANUP ERROR] ${e.message}`]);
+                    } finally {
+                        setIsCleaning(false);
+                    }
+                    return;
+                }
+
+                // Standard single-folder cleanup
                 setProgressLog(prev => [...prev.slice(-50), `[CLEANUP] Starting recursive empty folder scan...`]);
                 
                 try {
@@ -984,6 +1250,92 @@
                     }
                 } catch (e) {
                     setProgressLog(prev => [...prev, `[CLEANUP ERROR] Failed to connect to server.`]);
+                } finally {
+                    setIsCleaning(false);
+                }
+            };
+
+            const purgeDuplicates = async () => {
+                if (isCleaning || isRunning) return;
+
+                setIsCleaning(true);
+                setIsConsoleExpanded(true);
+
+                // If in queue mode, purge dupes across all roots
+                if (isQueueMode) {
+                    if (!confirm("PURGE DUPLICATES: This will permanently DELETE all files in the duplicates/ folder for EVERY folder in the queue. Continue?")) {
+                        setIsCleaning(false);
+                        return;
+                    }
+                    setProgressLog(prev => [...prev.slice(-50), `[PURGE] Batch mode: loading queue file...`]);
+                    try {
+                        const absPath = organizedPath.trim().replace(/\\/g, "/");
+                        const res = await fetch(`${serverUrl}/_abs/${encodeURIComponent(absPath)}`);
+                        if (!res.ok) { alert("Could not read batch file."); setIsCleaning(false); return; }
+                        const rawText = await res.text();
+                        const paths = rawText.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+
+                        let totalFiles = 0;
+                        let totalMB = 0;
+                        for (let i = 0; i < paths.length; i++) {
+                            setProgressLog(prev => [...prev, `[PURGE] (${i + 1}/${paths.length}) Purging dupes in: ${paths[i]}`]);
+                            try {
+                                const purgeRes = await fetch(`${serverUrl}/api/purge_duplicates`, {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ root: paths[i] })
+                                });
+                                const result = await purgeRes.json();
+                                if (purgeRes.ok) {
+                                    totalFiles += result.files_deleted;
+                                    totalMB += result.size_freed_mb;
+                                    setProgressLog(prev => [...prev,
+                                        `  Deleted ${result.files_deleted} file(s), freed ${result.size_freed_mb} MB`
+                                    ]);
+                                } else {
+                                    setProgressLog(prev => [...prev, `  ERROR: ${result.error}`]);
+                                }
+                            } catch (e) {
+                                setProgressLog(prev => [...prev, `  ERROR: Connection failed for ${paths[i]}`]);
+                            }
+                        }
+                        setProgressLog(prev => [...prev, `[PURGE] Batch complete: ${totalFiles} duplicate files deleted, ${totalMB.toFixed(2)} MB freed.`]);
+                    } catch (e) {
+                        setProgressLog(prev => [...prev, `[PURGE ERROR] ${e.message}`]);
+                    } finally {
+                        setIsCleaning(false);
+                    }
+                    return;
+                }
+
+                // Single-folder purge
+                if (!confirm("PURGE DUPLICATES: This will permanently DELETE all files in the duplicates/ folder. This cannot be undone. Continue?")) {
+                    setIsCleaning(false);
+                    return;
+                }
+                setProgressLog(prev => [...prev.slice(-50), `[PURGE] Scanning for duplicates folder...`]);
+                try {
+                    const res = await fetch(`${serverUrl}/api/purge_duplicates`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({})
+                    });
+                    const result = await res.json();
+                    if (res.ok) {
+                        if (result.files_deleted > 0) {
+                            setProgressLog(prev => [...prev,
+                                `[PURGE] Deleted ${result.files_deleted} duplicate file(s) from ${result.dupes_path}`,
+                                `[PURGE] Freed ${result.size_freed_mb} MB of disk space.`,
+                                `[PURGE] Removed ${result.dirs_deleted} empty subfolder(s).`
+                            ]);
+                        } else {
+                            setProgressLog(prev => [...prev, `[PURGE] ${result.message || 'No duplicate files found.'}`]);
+                        }
+                    } else {
+                        setProgressLog(prev => [...prev, `[PURGE ERROR] ${result.error}`]);
+                    }
+                } catch (e) {
+                    setProgressLog(prev => [...prev, `[PURGE ERROR] Failed to connect to server.`]);
                 } finally {
                     setIsCleaning(false);
                 }
@@ -1147,6 +1499,14 @@
                                             <LucideIcon name="external-link" className="w-4 h-4 text-slate-500" />
                                             Browse Logs Folder
                                         </button>
+                                        <div className="h-px bg-white/5 my-1 mx-2"></div>
+                                        <button
+                                            onClick={() => window.open('downloads.html', '_blank')}
+                                            className="w-full px-4 py-2.5 text-left text-[11px] font-bold text-slate-300 hover:bg-white/5 flex items-center gap-3 transition-colors"
+                                        >
+                                            <LucideIcon name="download" className="w-4 h-4 text-emerald-500" />
+                                            Download Manager
+                                        </button>
                                         <input
                                             type="file"
                                             id="hidden-log-picker"
@@ -1180,33 +1540,39 @@
                             <div className="flex flex-col gap-3 bg-slate-900/40 p-4 rounded-xl border border-white/5 shadow-inner">
                                 <div className="space-y-1.5">
                                     <div className="flex items-center gap-2 group relative">
-                                        <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Source Folder</span>
+                                        <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest">{isQueueMode ? 'Batch Queue File' : 'Source Folder'}</span>
                                         <div className="relative group/tooltip">
                                             <LucideIcon name="info" className="w-3 h-3 text-slate-600 hover:text-amber-500 cursor-help transition-colors" />
                                             <div className="absolute left-6 top-1/2 -translate-y-1/2 w-52 p-2.5 bg-slate-800 text-[9px] text-slate-300 rounded-lg border border-slate-700 shadow-2xl opacity-0 group-hover/tooltip:opacity-100 pointer-events-none transition-all z-50 leading-relaxed normal-case font-normal">
-                                                Simulate first to verify groupings. Commit will permanently move/copy files.
+                                                {isQueueMode ? 'Paste a path to a .txt file containing one folder path per line. Lines starting with # are ignored.' : 'Simulate first to verify groupings. Commit will permanently move/copy files.'}
                                             </div>
                                         </div>
-                                        <div className="flex-1"></div>
+                                        <div className="flex-1">
+                                            {batchIndex >= 0 && (
+                                                <div className="text-[8px] font-black text-emerald-400 uppercase tracking-widest text-right truncate animate-pulse">
+                                                    Queue {batchIndex + 1}/{batchTotal} — {batchCurrentPath.split(/[\\/]/).pop()}
+                                                </div>
+                                            )}
+                                        </div>
                                         {isRootSyncing && <LucideIcon name="loader-2" className="w-3 h-3 text-amber-500 animate-spin" />}
                                     </div>
                                     <input
-                                        className="w-full bg-black/40 border border-slate-700/50 rounded-xl px-3 py-1.5 text-[10px] font-mono text-slate-400 focus:outline-none focus:border-amber-500/30 transition-all font-bold"
-                                        placeholder="E:/Media/Organize..."
+                                        className={`w-full bg-black/40 border rounded-xl px-3 py-1.5 text-[10px] font-mono text-slate-400 focus:outline-none transition-all font-bold ${isQueueMode ? 'border-emerald-500/40 focus:border-emerald-500/60' : 'border-slate-700/50 focus:border-amber-500/30'}`}
+                                        placeholder={isQueueMode ? 'C:/batch_list.txt' : 'E:/Media/Organize...'}
                                         value={organizedPath}
                                         onChange={(e) => setOrganizedPath(e.target.value)}
-                                        onBlur={() => updateBackendRoot(organizedPath)}
+                                        onBlur={() => { if (!isQueueMode) updateBackendRoot(organizedPath); }}
                                     />
                                 </div>
 
                                 <div className="grid grid-cols-2 gap-2">
                                     <button
-                                        onClick={() => runOrganizer(false)}
+                                        onClick={() => isQueueMode ? startBatchQueue() : runOrganizer(false)}
                                         disabled={isRunning || !organizedPath}
-                                        className={`py-2 rounded-xl font-black text-[9px] uppercase tracking-wider transition-all flex items-center justify-center gap-2 ${isRunning ? 'bg-slate-800 text-slate-600' : 'bg-amber-600 hover:bg-amber-500 text-white shadow-lg shadow-amber-500/10 active:scale-[0.98]'}`}
+                                        className={`py-2 rounded-xl font-black text-[9px] uppercase tracking-wider transition-all flex items-center justify-center gap-2 ${isRunning ? 'bg-slate-800 text-slate-600' : isQueueMode ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-500/10 active:scale-[0.98]' : 'bg-amber-600 hover:bg-amber-500 text-white shadow-lg shadow-amber-500/10 active:scale-[0.98]'}`}
                                     >
-                                        <LucideIcon name={isRunning ? "loader-2" : "play"} className={`w-3 h-3 ${isRunning ? 'animate-spin' : ''}`} />
-                                        {isRunning ? "Running..." : "Simulate"}
+                                        <LucideIcon name={isRunning && batchIndex >= 0 ? "loader-2" : isQueueMode ? "list-plus" : isRunning ? "loader-2" : "play"} className={`w-3 h-3 ${isRunning ? 'animate-spin' : ''}`} />
+                                        {isRunning && batchIndex >= 0 ? `Queue ${batchIndex + 1}/${batchTotal}` : isQueueMode ? 'Load Queue...' : isRunning ? 'Running...' : 'Simulate'}
                                     </button>
 
                                     <button
@@ -1220,27 +1586,41 @@
 
                                     <button
                                         onClick={() => {
-                                            if (logFilename && data.length > 0) {
+                                            if (isQueueMode) {
+                                                if (confirm(`GROUP COMMIT: This will run REAL file operations on ALL folders in the queue. Continue?`)) {
+                                                    startBatchQueue(false);
+                                                }
+                                            } else if (logFilename && data.length > 0) {
                                                 setShowCommitConfirm(true);
                                             } else {
                                                 runOrganizer(true);
                                             }
                                         }}
                                         disabled={isRunning || isCleaning || !organizedPath}
-                                        className={`py-2 rounded-xl font-bold text-[9px] uppercase tracking-wider transition-all flex items-center justify-center gap-2 ${isRunning ? 'bg-slate-800/50 text-slate-700' : logFilename && data.length > 0 ? 'bg-emerald-600 hover:bg-emerald-500 text-white border border-emerald-400/20 active:scale-[0.98]' : 'bg-indigo-600 hover:bg-indigo-500 text-white border border-indigo-400/20 active:scale-[0.98]'}`}
+                                        className={`py-2 rounded-xl font-bold text-[9px] uppercase tracking-wider transition-all flex items-center justify-center gap-2 ${isRunning ? 'bg-slate-800/50 text-slate-700' : isQueueMode ? 'bg-red-600 hover:bg-red-500 text-white border border-red-400/20 active:scale-[0.98]' : logFilename && data.length > 0 ? 'bg-emerald-600 hover:bg-emerald-500 text-white border border-emerald-400/20 active:scale-[0.98]' : 'bg-indigo-600 hover:bg-indigo-500 text-white border border-indigo-400/20 active:scale-[0.98]'}`}
                                     >
-                                        <LucideIcon name={logFilename && data.length > 0 ? "check-circle" : "zap"} className={`w-3 h-3 ${isRunning ? 'opacity-20' : ''}`} />
-                                        {logFilename && data.length > 0 ? 'Execute Log' : 'Commit'}
+                                        <LucideIcon name={isQueueMode ? "rocket" : logFilename && data.length > 0 ? "check-circle" : "zap"} className={`w-3 h-3 ${isRunning ? 'opacity-20' : ''}`} />
+                                        {isQueueMode ? 'Group Commit' : logFilename && data.length > 0 ? 'Execute Log' : 'Commit'}
                                     </button>
 
-                                    <button
-                                        onClick={cleanupEmptyDirs}
-                                        disabled={isRunning || isCleaning || !organizedPath}
-                                        className={`py-2 rounded-xl font-bold text-[9px] uppercase tracking-wider transition-all flex items-center justify-center gap-2 border bg-slate-900 shadow-inner hover:bg-slate-800 active:scale-[0.5] ${isRunning || isCleaning ? 'opacity-40 border-slate-800 text-slate-600' : 'border-slate-700 text-slate-400 hover:border-slate-500 hover:text-slate-300'}`}
-                                    >
-                                        <LucideIcon name={isCleaning ? "loader-2" : "trash-2"} className={`w-3 h-3 ${isCleaning ? 'animate-spin text-amber-500' : ''}`} />
-                                        {isCleaning ? "Clean" : "Cleanup"}
-                                    </button>
+                                    <div className="grid grid-cols-2 gap-1.5 col-span-2">
+                                        <button
+                                            onClick={cleanupEmptyDirs}
+                                            disabled={isRunning || isCleaning || !organizedPath}
+                                            className={`py-2 rounded-xl font-bold text-[9px] uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 border bg-slate-900 shadow-inner hover:bg-slate-800 active:scale-[0.98] ${isRunning || isCleaning ? 'opacity-40 border-slate-800 text-slate-600' : 'border-slate-700 text-slate-400 hover:border-slate-500 hover:text-slate-300'}`}
+                                        >
+                                            <LucideIcon name={isCleaning ? "loader-2" : "folder-x"} className={`w-3 h-3 ${isCleaning ? 'animate-spin text-amber-500' : ''}`} />
+                                            {isCleaning ? "Cleaning..." : "Cleanup"}
+                                        </button>
+                                        <button
+                                            onClick={purgeDuplicates}
+                                            disabled={isRunning || isCleaning || !organizedPath}
+                                            className={`py-2 rounded-xl font-bold text-[9px] uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 border bg-slate-900 shadow-inner hover:bg-slate-800 active:scale-[0.98] ${isRunning || isCleaning ? 'opacity-40 border-slate-800 text-slate-600' : 'border-red-900/50 text-red-400/80 hover:border-red-500/50 hover:text-red-300'}`}
+                                        >
+                                            <LucideIcon name={isCleaning ? "loader-2" : "trash-2"} className={`w-3 h-3 ${isCleaning ? 'animate-spin text-amber-500' : ''}`} />
+                                            Purge Dupes
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -1611,13 +1991,13 @@
                         )}
                     </aside >
 
-                    {/* Navigation Sidebar: Groups */}
-                    <nav className={`${isInventoryCollapsed ? 'w-14' : 'w-64'} bg-[#0a0f1d] border-r border-slate-800 flex flex-col h-full overflow-hidden transition-all duration-300 relative`}>
+                    {/* Navigation Sidebar: Directory Tree */}
+                    <nav className={`${isInventoryCollapsed ? 'w-14' : 'w-72'} bg-[#0a0f1d] border-r border-slate-800 flex flex-col h-full overflow-hidden transition-all duration-300 relative`}>
                         {/* Collapse Toggle */}
                         <button
                             onClick={() => setIsInventoryCollapsed(!isInventoryCollapsed)}
                             className="absolute top-3 right-0 translate-x-1/2 z-30 w-5 h-10 bg-slate-800 hover:bg-amber-500/20 border border-slate-700 hover:border-amber-500/40 rounded-full flex items-center justify-center transition-all group"
-                            title={isInventoryCollapsed ? 'Expand Inventory' : 'Collapse Inventory'}
+                            title={isInventoryCollapsed ? 'Expand Tree' : 'Collapse Tree'}
                         >
                             <LucideIcon name={isInventoryCollapsed ? 'chevron-right' : 'chevron-left'} className="w-3 h-3 text-slate-500 group-hover:text-amber-400 transition-colors" />
                         </button>
@@ -1626,9 +2006,9 @@
                             <>
                                 <div className="p-4 border-b border-white/5 space-y-2">
                                     <div className="flex items-center justify-between">
-                                        <span className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-600">Inventory</span>
+                                        <span className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-600">Directory Tree</span>
                                         <div className="p-1 bg-amber-500/10 rounded flex items-center text-amber-500 text-[8px] font-bold">
-                                            {stats.clusters} NEW
+                                            {Object.keys(groups).length} dirs
                                         </div>
                                     </div>
                                     {logFilename && (
@@ -1638,43 +2018,116 @@
                                         </div>
                                     )}
                                 </div>
-                                <div className="flex-1 overflow-y-auto p-4 space-y-2 scrollbar-none">
-                                    {clusterKeys.map(key => {
-                                        const isSelected = selectedCluster === key;
-                                        const count = groups[key].length;
-                                        const isNoise = key === "noise";
-                                        const isDup = key === "duplicate";
-                                        const isVideo = key.startsWith("video/");
+                                <div className="flex-1 overflow-y-auto p-3 scrollbar-none">
+                                    {data.length === 0 ? (
+                                        <div className="flex flex-col items-center justify-center h-full opacity-30">
+                                            <LucideIcon name="folder-tree" className="w-8 h-8 text-slate-700 mb-3" />
+                                            <span className="text-[9px] font-black text-slate-700 uppercase tracking-widest">Run a simulation</span>
+                                        </div>
+                                    ) : (() => {
+                                        const dirCounts = {};
+                                        const dirCluster = {};
+                                        data.forEach(row => {
+                                            const dir = getVirtualPath(row);
+                                            if (!dir) return;
+                                            dirCounts[dir] = (dirCounts[dir] || 0) + 1;
+                                            
+                                            // Map this directory to the cluster ID for workspace filtering
+                                            // We take the first cluster ID that lands in this directory
+                                            if (!dirCluster[dir]) dirCluster[dir] = row.Cluster_ID || "";
+                                        });
 
-                                        let label = key;
-                                        if (isNoise) label = "Unsorted";
-                                        if (isDup) label = "Deduplicated";
-                                        if (isVideo) label = key.replace("video/", "");
+                                        const buildTree = (dirs) => {
+                                            const root = {};
+                                            Object.entries(dirs).forEach(([path, count]) => {
+                                                const parts = path.split("/");
+                                                let node = root;
+                                                parts.forEach((part, i) => {
+                                                    if (!node[part]) node[part] = { __ch: {}, __n: 0, __p: parts.slice(0, i + 1).join("/") };
+                                                    if (i === parts.length - 1) node[part].__n = count;
+                                                    node = node[part].__ch;
+                                                });
+                                            });
+                                            return root;
+                                        };
+                                        const treeData = buildTree(dirCounts);
+
+                                        const TreeNode = ({ name, node, depth = 0 }) => {
+                                            const [open, setOpen] = useState(depth < 2);
+                                            const childKeys = Object.keys(node.__ch);
+                                            const hasChildren = childKeys.length > 0;
+                                            const countAll = (n) => n.__n + Object.values(n.__ch).reduce((s, c) => s + countAll(c), 0);
+                                            const totalFiles = countAll(node);
+                                            const clusterId = dirCluster[node.__p];
+                                            const isSelectedDir = selectedCluster && clusterId === selectedCluster;
+
+                                            const nl = name.toLowerCase();
+                                            let icon = "folder";
+                                            if (nl === "duplicates" || nl === "review_needed") icon = "copy";
+                                            else if (nl === "unsorted" || nl === "noise") icon = "help-circle";
+                                            else if (nl === "videos" || nl === "horizontal" || nl === "vertical") icon = "video";
+                                            else if (nl.startsWith("group_")) icon = "layers";
+
+                                            return (
+                                                <div>
+                                                    <button
+                                                        onClick={() => {
+                                                            if (hasChildren) setOpen(!open);
+                                                            if (clusterId) setSelectedCluster(clusterId);
+                                                        }}
+                                                        className={`w-full flex items-center gap-1.5 py-1 px-1 rounded-lg text-left transition-all hover:bg-white/5 group ${isSelectedDir ? 'bg-amber-500/10' : ''}`}
+                                                        style={{ paddingLeft: `${depth * 12 + 6}px` }}
+                                                    >
+                                                        {hasChildren ? (
+                                                            <LucideIcon name={open ? "chevron-down" : "chevron-right"} className="w-2.5 h-2.5 text-slate-600 group-hover:text-slate-400 flex-shrink-0" />
+                                                        ) : (
+                                                            <span className="w-2.5 flex-shrink-0" />
+                                                        )}
+                                                        <LucideIcon name={open && hasChildren ? "folder-open" : icon} className={`w-3 h-3 flex-shrink-0 ${isSelectedDir ? 'text-amber-400' : nl === 'duplicates' ? 'text-red-400' : nl === 'unsorted' ? 'text-slate-500' : 'text-blue-400/70'}`} />
+                                                        <span className={`text-[10px] font-bold truncate flex-1 ${isSelectedDir ? 'text-amber-400' : 'text-slate-400 group-hover:text-slate-200'}`}>{name}</span>
+                                                        <span className={`text-[8px] font-black px-1.5 py-0.5 rounded-md flex-shrink-0 ${isSelectedDir ? 'bg-amber-500/20 text-amber-400' : 'bg-slate-800/80 text-slate-600'}`}>
+                                                            {totalFiles}
+                                                        </span>
+                                                    </button>
+                                                    {open && hasChildren && (
+                                                        <div>
+                                                            {childKeys.sort().map(ck => (
+                                                                <TreeNode key={ck} name={ck} node={node.__ch[ck]} depth={depth + 1} />
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        };
 
                                         return (
-                                            <button
-                                                key={key}
-                                                onClick={() => setSelectedCluster(key)}
-                                                className={`w-full p-3 rounded-xl text-left transition-all flex items-center justify-between group relative overflow-hidden ${isSelected ? 'bg-amber-500/10 text-amber-500 border border-amber-500/30' : 'hover:bg-slate-800/50 text-slate-400 border border-transparent'
-                                                    }`}
-                                            >
-                                                <div className="flex items-center gap-3 relative z-10">
-                                                    <LucideIcon name={isNoise ? "help-circle" : (isDup ? "copy" : (isVideo ? "video" : "folder"))} className={`w-3.5 h-3.5 ${isSelected ? "text-amber-500" : "text-slate-600"}`} />
-                                                    <span className="text-xs font-bold leading-none truncate max-w-[120px]">{label}</span>
+                                            <div className="space-y-0.5">
+                                                <div className="flex items-center gap-2 px-2 py-1.5 mb-1">
+                                                    <LucideIcon name="hard-drive" className="w-3 h-3 text-emerald-500" />
+                                                    <span className="text-[9px] font-black text-emerald-500 uppercase tracking-wider truncate">
+                                                        {organizedPath ? organizedPath.split(/[\\/]/).pop() : 'Root'}
+                                                    </span>
+                                                    <span className="text-[8px] font-black bg-emerald-500/10 text-emerald-500 px-1.5 py-0.5 rounded ml-1 animate-pulse">PREVIEW</span>
+                                                    <span className="text-[8px] font-bold text-slate-600 ml-auto">{data.length} files</span>
                                                 </div>
-                                                <span className={`text-[9px] font-black px-1.5 py-0.5 rounded border relative z-10 ${isSelected ? "bg-amber-500 text-white border-amber-400" : "bg-slate-900 border-slate-700 text-slate-500"}`}>
-                                                    {count}
-                                                </span>
-                                            </button>
+                                                <div className="border-l border-white/5 ml-4">
+                                                    {Object.keys(treeData).sort((a, b) => {
+                                                        const order = (n) => n.toLowerCase() === 'duplicates' ? 3 : n.toLowerCase() === 'unsorted' ? 2 : n.toLowerCase().startsWith('group_') ? 0 : 1;
+                                                        return order(a) - order(b) || a.localeCompare(b);
+                                                    }).map(key => (
+                                                        <TreeNode key={key} name={key} node={treeData[key]} depth={0} />
+                                                    ))}
+                                                </div>
+                                            </div>
                                         );
-                                    })}
+                                    })()}
                                 </div>
                             </>
                         ) : (
                             <div className="flex-1 overflow-y-auto py-4 flex flex-col items-center gap-1 scrollbar-none">
                                 <div className="mb-3 pb-3 border-b border-white/5 w-full flex justify-center">
-                                    <div className="p-1.5 bg-amber-500/10 rounded text-amber-500 text-[7px] font-black">
-                                        {stats.clusters}
+                                    <div className="p-1.5 bg-amber-500/10 rounded text-amber-500">
+                                        <LucideIcon name="folder-tree" className="w-3.5 h-3.5" />
                                     </div>
                                 </div>
                                 {clusterKeys.map(key => {
@@ -1797,6 +2250,7 @@
                                                         item={item}
                                                         getImageUrl={getImageUrl}
                                                         onImageClick={setLightboxItem}
+                                                        virtualPath={getVirtualPath(item)}
                                                     />
                                                 ))}
                                             </div>

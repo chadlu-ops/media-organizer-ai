@@ -13,6 +13,7 @@ The tool operates in a strictly ordered pipeline to ensure maximum data integrit
 - **Perceptual Video Deduplication**: A advanced "Tri-Path" filter to find visually identical videos across different resolutions and bitrates.
 - **Image De-duplication**: MD5-based exact match detection for images.
 - **AI Clustering**: Content-aware grouping of images using CLIP embeddings and HDBSCAN.
+- **Download Manager**: A built-in web frontend for `gallery-dl` to retrieve media from 1,000+ sites directly into your workspace.
 
 ---
 
@@ -58,8 +59,21 @@ The Media Organizer now features a robust perceptual deduplication engine for vi
 - **Conflict Prevention**: Uses path-based hashing to ensure no two files ever collide.
 
 ### 5. Phase 05: Audit & Logging
-- **Logic**: Records every single file movement into a CSV database.
-- **Result**: Generates a `migration_log.csv` containing hashes, cluster IDs, confidence scores, and reasons for every move. This CSV is the data source for the **Visualizer UI**.
+- **Result**: Records every single file movement into a CSV database.
+- **Benefit**: Generates a `migration_log.csv` containing hashes, cluster IDs, confidence scores, and reasons for every move. This CSV is the data source for the **Visualizer UI**.
+
+---
+
+## ⏬ Download Manager
+
+The Media Organizer now includes a integrated **Download Manager** — a sleek web interface for `gallery-dl`. This allows you to scale your collection directly from within the suite.
+
+### Key Features:
+- **Sequential Queue**: Paste multiple URLs and download them in a single batch.
+- **Live Terminal Console**: Real-time feedback and progress streaming from background processes.
+- **Link History**: A persistent database of past downloads with "Re-queue" functionality.
+- **Config Editor**: Direct browser-based editing of `gallery-dl.conf` for credentials and folder targets.
+- **Update Notifications**: Checks for and installs `gallery-dl` updates with one click.
 
 ---
 
@@ -156,16 +170,24 @@ Because AI embedding generation (CLIP) and spatial color signature extraction ar
 
 ## 🛠️ Usage & Local Setup
 
-### Installation
+### Installation (First Time)
+1. **Ensue Python 3.10+** is installed on your system.
+2. Run `setup.bat`. This will automatically:
+   - Create a virtual environment (`.venv`).
+   - Install all dependencies from `requirements.txt` (including `gallery-dl`).
+   - Upgrade `pip` to the latest version.
+
+### Manual Installation
 ```bash
-pip install -r requirements.txt
-# Requires: torch, clip, Pillow, scikit-learn, hdbscan, tqdm
+python -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
+# Requires: torch, clip, Pillow, scikit-learn, hdbscan, tqdm, gallery-dl
 ```
 
-### Running the Organizer (CLI)
-```bash
-python media_organizer.py --root "E:/My/Media" --dry-run
-```
+### Running the Optimizer
+Always launch the server using the provided batch file to ensure the virtual environment is correctly used:
+1. Run `restart_server.bat`.
+2. Open `http://localhost:8000/visualizer.html` or `http://localhost:8000/downloads.html`.
 
 ### Navigating the Visualizer (Web UI)
 1. Run `python visualize_helper.py`.

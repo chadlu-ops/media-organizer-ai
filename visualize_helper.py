@@ -9,6 +9,7 @@ import urllib.parse
 import shutil
 import mimetypes
 from pathlib import Path
+from datetime import datetime
 
 PORT = 8000
 # Global state for current serving directory
@@ -19,6 +20,9 @@ PROGRESS_LOG = []
 SCHEMA_LOCK = threading.Lock()
 SCHEMA_CACHE = {"data": None, "time": 0}
 SCHEMA_CACHE_TTL = 2  # 2 second cache to prevent flood reloads
+DOWNLOAD_IS_RUNNING = False
+DOWNLOAD_LOG = []
+DOWNLOAD_HISTORY_FILE = SCRIPT_DIR / "download_history.json"
 
 class ThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     def handle_error(self, request, client_address):
@@ -150,11 +154,33 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                 })
             except Exception as e:
                 self.send_json(500, {"error": str(e)})
+        elif self.path == '/api/downloads/status':
+            self.send_json(200, {
+                "running": DOWNLOAD_IS_RUNNING,
+                "log": DOWNLOAD_LOG[-100:]
+            })
+        elif self.path == '/api/downloads/config':
+            config_path = SCRIPT_DIR / "gallery-dl.conf"
+            if config_path.exists():
+                with open(config_path, "r", encoding="utf-8") as f:
+                    self.send_json(200, {"config": f.read()})
+            else:
+                self.send_json(200, {"config": ""})
+        elif self.path == '/api/downloads/history':
+            if DOWNLOAD_HISTORY_FILE.exists():
+                with open(DOWNLOAD_HISTORY_FILE, "r", encoding="utf-8") as f:
+                    try:
+                        history = json.load(f)
+                    except:
+                        history = []
+                    self.send_json(200, {"history": history})
+            else:
+                self.send_json(200, {"history": []})
         else:
             return super().do_GET()
 
     def do_POST(self):
-        global CURRENT_ROOT, IS_RUNNING, PROGRESS_LOG
+        global CURRENT_ROOT, IS_RUNNING, PROGRESS_LOG, DOWNLOAD_IS_RUNNING, DOWNLOAD_LOG
         if self.path == '/api/set_root' or self.path.startswith('/api/set_root?'):
             content_length = int(self.headers['Content-Length'])
             post_data = self.rfile.read(content_length)
@@ -364,6 +390,98 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                 print(f"[CLEANUP ERR] {e}")
                 self.send_json(500, {"error": str(e)})
 
+        elif self.path == '/api/cleanup_for_root':
+            # Targeted cleanup for a specific root path (used by batch queue)
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                params = json.loads(post_data)
+                target_root = Path(params.get('root', '').strip())
+                
+                if not target_root.exists() or not target_root.is_dir():
+                    self.send_json(404, {"error": f"Directory not found: {target_root}"})
+                    return
+                
+                deleted = []
+                for root, dirs, files in os.walk(target_root, topdown=False):
+                    for name in dirs:
+                        dir_path = Path(root) / name
+                        if name in ["Organized", "logs"]:
+                            continue
+                        try:
+                            if not any(dir_path.iterdir()):
+                                dir_path.rmdir()
+                                rel_path = str(dir_path.relative_to(target_root))
+                                deleted.append(rel_path)
+                                print(f"[CLEANUP] Deleted empty folder: {rel_path}")
+                        except Exception as e:
+                            print(f"[CLEANUP ERR] Failed to delete {dir_path}: {e}")
+                
+                self.send_json(200, {"status": "success", "root": str(target_root), "count": len(deleted), "deleted": deleted})
+            except Exception as e:
+                print(f"[CLEANUP ERR] {e}")
+                self.send_json(500, {"error": str(e)})
+
+        elif self.path == '/api/purge_duplicates':
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                params = json.loads(post_data)
+                target_root = Path(params.get('root', '').strip()) if params.get('root') else CURRENT_ROOT
+                
+                if not target_root.exists():
+                    self.send_json(404, {"error": "Root directory not found"})
+                    return
+                
+                # Look for duplicates/ under Organized/ or directly under root
+                dupes_dir = target_root / "Organized" / "duplicates"
+                if not dupes_dir.exists():
+                    dupes_dir = target_root / "duplicates"
+                
+                if not dupes_dir.exists():
+                    self.send_json(200, {"status": "success", "count": 0, "message": "No duplicates folder found"})
+                    return
+                
+                deleted_files = []
+                deleted_dirs = []
+                
+                # Delete all files inside duplicates/
+                for item in dupes_dir.rglob("*"):
+                    if item.is_file():
+                        try:
+                            size = item.stat().st_size
+                            item.unlink()
+                            rel = str(item.relative_to(dupes_dir))
+                            deleted_files.append({"path": rel, "size": size})
+                            print(f"[PURGE] Deleted: {rel}")
+                        except Exception as e:
+                            print(f"[PURGE ERR] {item}: {e}")
+                
+                # Clean up empty subdirectories inside duplicates/
+                for root_d, dirs, files in os.walk(dupes_dir, topdown=False):
+                    for name in dirs:
+                        dir_path = Path(root_d) / name
+                        try:
+                            if not any(dir_path.iterdir()):
+                                dir_path.rmdir()
+                                deleted_dirs.append(str(dir_path.relative_to(dupes_dir)))
+                        except:
+                            pass
+                
+                total_size = sum(f["size"] for f in deleted_files)
+                size_mb = round(total_size / (1024 * 1024), 2)
+                
+                self.send_json(200, {
+                    "status": "success",
+                    "files_deleted": len(deleted_files),
+                    "dirs_deleted": len(deleted_dirs),
+                    "size_freed_mb": size_mb,
+                    "dupes_path": str(dupes_dir)
+                })
+            except Exception as e:
+                print(f"[PURGE ERR] {e}")
+                self.send_json(500, {"error": str(e)})
+
         elif self.path == '/api/diagnose':
             content_length = int(self.headers.get('Content-Length', 0))
             post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
@@ -531,6 +649,145 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_json(200, {"status": "launched", "log_file": str(log_path)})
             except Exception as e:
                 print(f"[API] Commit Error: {e}")
+                self.send_json(500, {"error": str(e)})
+
+        elif self.path == '/api/downloads/run':
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                params = json.loads(post_data)
+                urls = params.get('urls', [])
+                if not urls:
+                    self.send_json(400, {"error": "No URLs provided"})
+                    return
+                
+                # Check if gallery-dl is available
+                # We'll use the venv's executive if it exists, otherwise assume global
+                venv_python = SCRIPT_DIR / ".venv" / "Scripts" / "python.exe"
+                if venv_python.exists():
+                    gdl_cmd = [str(venv_python), "-m", "gallery_dl"]
+                else:
+                    gdl_cmd = ["gallery-dl"]
+
+                cmd = gdl_cmd + ["-c", "gallery-dl.conf"] + urls
+                
+                DOWNLOAD_IS_RUNNING = True
+                DOWNLOAD_LOG = [f"[GDL] Starting download for {len(urls)} items..."]
+                start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                
+                def run_gdl():
+                    global DOWNLOAD_IS_RUNNING, DOWNLOAD_LOG
+                    file_count = 0
+                    try:
+                        env = os.environ.copy()
+                        env["PYTHONUNBUFFERED"] = "1"
+                        
+                        process = subprocess.Popen(
+                            cmd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            bufsize=0,
+                            env=env,
+                            cwd=str(SCRIPT_DIR)
+                        )
+                        
+                        line_buffer = b''
+                        while True:
+                            chunk = process.stdout.read1(4096) if hasattr(process.stdout, 'read1') else process.stdout.read(1)
+                            if not chunk: break
+                            line_buffer += chunk
+                            while b'\n' in line_buffer or b'\r' in line_buffer:
+                                n_pos = line_buffer.find(b'\n')
+                                r_pos = line_buffer.find(b'\r')
+                                split_pos = min(n_pos, r_pos) if n_pos != -1 and r_pos != -1 else (n_pos if r_pos == -1 else r_pos)
+                                raw_line = line_buffer[:split_pos]
+                                if split_pos + 1 < len(line_buffer) and line_buffer[split_pos:split_pos+2] == b'\r\n':
+                                    line_buffer = line_buffer[split_pos+2:]
+                                else:
+                                    line_buffer = line_buffer[split_pos+1:]
+                                try:
+                                    line = raw_line.decode('utf-8', errors='replace').strip()
+                                except:
+                                    line = str(raw_line)
+                                if line:
+                                    DOWNLOAD_LOG.append(line)
+                                    # Very simple detection: if it doesn't start with [ and looks like a path/filename
+                                    if not line.startswith('[') and ('.' in line or '/' in line or '\\' in line):
+                                        file_count += 1
+                        
+                        process.wait()
+                        DOWNLOAD_LOG.append(f"[GDL] Finished with code {process.returncode}")
+                        
+                        # Save to history
+                        try:
+                            history = []
+                            if DOWNLOAD_HISTORY_FILE.exists():
+                                with open(DOWNLOAD_HISTORY_FILE, "r", encoding="utf-8") as f:
+                                    history = json.load(f)
+                            history.insert(0, {
+                                "timestamp": start_time,
+                                "urls": urls,
+                                "count": file_count,
+                                "status": "Finished" if process.returncode == 0 else f"Error ({process.returncode})"
+                            })
+                            # Keep only last 100 entries
+                            history = history[:100]
+                            with open(DOWNLOAD_HISTORY_FILE, "w", encoding="utf-8") as f:
+                                json.dump(history, f, indent=2)
+                        except Exception as hist_e:
+                            print(f"[GDL] History error: {hist_e}")
+
+                    except Exception as e:
+                        DOWNLOAD_LOG.append(f"[GDL] Error: {e}")
+                    finally:
+                        DOWNLOAD_IS_RUNNING = False
+
+                threading.Thread(target=run_gdl).start()
+                self.send_json(200, {"status": "launched"})
+            except Exception as e:
+                self.send_json(500, {"error": str(e)})
+
+        elif self.path == '/api/downloads/update':
+            try:
+                DOWNLOAD_IS_RUNNING = True
+                DOWNLOAD_LOG = ["[GDL] Checking for updates..."]
+                
+                venv_python = SCRIPT_DIR / ".venv" / "Scripts" / "python.exe"
+                if venv_python.exists():
+                    cmd = [str(venv_python), "-m", "pip", "install", "-U", "gallery-dl"]
+                else:
+                    cmd = [sys.executable, "-m", "pip", "install", "-U", "gallery-dl"]
+
+                def run_update():
+                    global DOWNLOAD_IS_RUNNING, DOWNLOAD_LOG
+                    try:
+                        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                        for line in process.stdout:
+                            if line.strip():
+                                DOWNLOAD_LOG.append(line.strip())
+                        process.wait()
+                        DOWNLOAD_LOG.append(f"[GDL] Update complete (Code: {process.returncode})")
+                    except Exception as e:
+                        DOWNLOAD_LOG.append(f"[GDL] Update error: {e}")
+                    finally:
+                        DOWNLOAD_IS_RUNNING = False
+
+                threading.Thread(target=run_update).start()
+                self.send_json(200, {"status": "launched"})
+            except Exception as e:
+                self.send_json(500, {"error": str(e)})
+
+        elif self.path == '/api/downloads/config':
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                params = json.loads(post_data)
+                config_content = params.get('config', '')
+                config_path = SCRIPT_DIR / "gallery-dl.conf"
+                with open(config_path, "w", encoding="utf-8") as f:
+                    f.write(config_content)
+                self.send_json(200, {"status": "success"})
+            except Exception as e:
                 self.send_json(500, {"error": str(e)})
 
         else:

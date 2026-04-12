@@ -1,5 +1,45 @@
 # Patch Notes
 
+## [0.3.2] - 2026-04-12
+### ✨ Download Manager & Deployment Automation
+- **Download Manager Interface**: Added a full-featured web dashboard for `gallery-dl`. Support for batch URL queues, live console output, and configuration management.
+- **Link History & Persistence**: Implemented a JSON-backed history system that tracks download dates, URLs, and file counts. Includes a "Re-queue" feature to reload previous targets instantly.
+- **Automated Deployment Script**: Created `setup.bat` for one-click environment initialization. Automatically creates virtual environments and installs all dependencies.
+- **Smarter Launcher**: Updated `restart_server.bat` to detect and prioritize the virtual environment, ensuring consistency across different hardware.
+- **Enhanced Progress Streaming**: Added real-time log capturing for background download processes, allowing users to monitor scraping progress line-by-line.
+
+### Fixed
+- **JSON Path Syntax**: Fixed a crash caused by single backslashes in the configuration file; the engine now handles path normalization for Windows compatibility.
+- **JSX Fragment Unbalance**: Resolved a syntax error in `downloads.html` that occurred during file corruption on full disks.
+- **Missing Module Import**: Added `datetime` to the backend to resolve `NameError` during history logging.
+
+## [0.3.1] - 2026-04-05
+### ✨ Batch Queue — Multi-Folder Processing
+- **Queue from Text File**: Paste a path to a `.txt` file in the Source Folder input. The system auto-detects `.txt` extensions and switches to batch mode.
+- **Adaptive Simulate Button**: When a `.txt` path is entered, the Simulate button turns **emerald green** and reads **"Load Queue..."** instead of "Simulate".
+- **Sequential Execution**: The queue reads one folder path per line (lines starting with `#` are treated as comments). Each folder is processed sequentially using the current tuning settings.
+- **Inline Queue Progress**: While the queue is running, a live status indicator appears to the right of the Source Folder label showing `Queue 3/12 — FolderName` so users can see which folder is being processed at a glance.
+- **Console Streaming**: The progress console shows queue-level headers (`[QUEUE] (1/12) Starting: E:\Photos\Vacation`) alongside the live process output from each folder's run.
+- **Error Resilience**: If a folder path is invalid or the organizer fails on a specific folder, it is skipped with a logged error and the queue continues to the next path.
+- **Batch Summary**: After all folders are processed, the console displays a completion banner with the total folder count.
+- **Group Commit**: The Commit button turns **red** and reads **"Group Commit"** when in queue mode. Clicking it triggers a confirmation dialog, then executes real file operations (move/copy) on every folder in the queue sequentially.
+- **Batch Cleanup**: The Cleanup button now works in queue mode — iterates through all folders in the `.txt` file and removes empty directories in each.
+- **Purge Duplicates**: New **"Purge Dupes"** button (red-tinted) permanently deletes all files in the `duplicates/` folder, freeing disk space. Shows total files deleted and MB recovered. Works in both single-folder and batch queue mode.
+- **Directory Tree View**: The Inventory panel has been replaced with an interactive **Directory Tree** that shows the exact folder hierarchy files will land in based on the loaded simulation log. Features include:
+  - Collapsible folder nodes with chevron expand/collapse (first 2 levels auto-expand)
+  - Rolled-up file count badges on every directory node
+  - Context-aware icons: folders, videos, duplicates (red), unsorted, groups
+  - Click any folder to select its cluster in the main workspace
+  - Root label shows the source folder name and total file count
+  - Empty state prompts "Run a simulation" when no log is loaded
+
+### New API Endpoints
+- `POST /api/cleanup_for_root` — Targeted empty-folder cleanup for a specific root path (used by batch queue).
+- `POST /api/purge_duplicates` — Deletes all files in the `duplicates/` directory under the specified root.
+
+### Notes
+- Batch runs currently execute as **dry-run (simulation)** by default for safety. Commit each log individually after reviewing results.
+
 ## [0.3.0] - 2026-04-02
 ### ✨ Commit from Log — Zero-Rescan Execution
 - **Log-Based Commit**: Users can now execute file operations directly from a previously generated simulation (dry-run) log, completely bypassing AI clustering, deduplication, and orientation scanning. This is the fastest path to finalizing an organization plan.

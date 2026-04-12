@@ -18,7 +18,14 @@ timeout /t 1 /nobreak >nul
 
 echo Starting server...
 echo.
-python visualize_helper.py
+
+set PY_EXE=python
+if exist ".venv\Scripts\python.exe" (
+    set PY_EXE=.venv\Scripts\python.exe
+    echo Using Virtual Environment.
+)
+
+%PY_EXE% visualize_helper.py
 
 if %ERRORLEVEL% neq 0 (
     echo.
