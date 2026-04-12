@@ -1,5 +1,15 @@
 # Patch Notes
 
+## [0.3.3] - 2026-04-12
+### ✨ Slideshow Viewer — The Living Wall
+- **Perfectly Contained Organic Layout**: Implemented a "Shrink-to-Fit" algorithm for Masonry mode that treats the entire grid as a single unit, perfectly containing it within the screen boundaries with zero cropping and zero overflow.
+- **Dynamic Pillarboxing**: Added support for automatic centering and ambient background filling when the Organic grid is narrower than the screen.
+- **Immersive Auto-Hide Controls**: Added a 3-second auto-hide timer with an ambient HUD.
+- **Perfect Vertical Containment**: Refactored the layout engine to ensure the grid perfectly fits the screen height, eliminating partially cut-off images at the bottom.
+- **Original Resolution Protection**: Implemented a "No Stretching" rule—images will never be upscaled beyond their natural resolution.
+- **Organic Layout Engine**: Added a "Masonry" layout mode that stacks images in columns, naturally preserving original aspect ratios.
+- **Ambient Blurred Backgrounds**: In "Natural" mode, empty space is filled with a soft, blurred version of the image for a premium, seamless aesthetic.
+
 ## [0.3.2] - 2026-04-12
 ### ✨ Download Manager & Deployment Automation
 - **Download Manager Interface**: Added a full-featured web dashboard for `gallery-dl`. Support for batch URL queues, live console output, and configuration management.

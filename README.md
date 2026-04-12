@@ -13,6 +13,7 @@ The tool operates in a strictly ordered pipeline to ensure maximum data integrit
 - **Perceptual Video Deduplication**: A advanced "Tri-Path" filter to find visually identical videos across different resolutions and bitrates.
 - **Image De-duplication**: MD5-based exact match detection for images.
 - **AI Clustering**: Content-aware grouping of images using CLIP embeddings and HDBSCAN.
+- **Slideshow Viewer**: A "Living Wall" display that fits images perfectly on screen with random, individual rotation and cinematic transitions.
 - **Download Manager**: A built-in web frontend for `gallery-dl` to retrieve media from 1,000+ sites directly into your workspace.
 
 ---

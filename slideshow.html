@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Slideshow Viewer — Living Wall</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;900&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #020617;
+            color: #f8fafc;
+            overflow: hidden;
+            margin: 0;
+        }
+        .glass {
+            background: rgba(15, 23, 42, 0.7);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .slideshow-container {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            position: relative;
+        }
+        .wall-layer {
+            flex: 1;
+            overflow: hidden;
+            position: relative;
+        }
+        .image-slot {
+            position: absolute;
+            transition: all 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+            overflow: hidden;
+        }
+        .image-content {
+            width: 100%;
+            height: 100%;
+            object-cover: cover;
+            transition: opacity 1s ease-in-out, transform 1s ease-in-out;
+        }
+
+        /* Transition Styles */
+        .trans-fade-enter { opacity: 0; }
+        .trans-fade-active { opacity: 1; }
+        
+        .trans-zoom-enter { opacity: 0; transform: scale(1.1); }
+        .trans-zoom-active { opacity: 1; transform: scale(1); }
+
+        .trans-slide-enter { opacity: 0; transform: translateX(20px); }
+        .trans-slide-active { opacity: 1; transform: translateX(0); }
+
+        .ken-burns {
+            animation: kenburns 20s infinite alternate linear;
+        }
+        @keyframes kenburns {
+            from { transform: scale(1) translate(0,0); }
+            to { transform: scale(1.2) translate(-2%, -2%); }
+        }
+
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useMemo, useCallback } = React;
+
+        const Transitions = {
+            FADE: 'fade',
+            ZOOM: 'zoom',
+            SLIDE: 'slide',
+            KEN_BURNS: 'ken_burns'
+        };
+
+        const LucideIcon = ({ name, className = "w-4 h-4" }) => {
+            const iconRef = useRef(null);
+            useEffect(() => {
+                if (iconRef.current && window.lucide) {
+                    iconRef.current.innerHTML = `<i data-lucide="${name}" class="${className}"></i>`;
+                    lucide.createIcons({ root: iconRef.current });
+                }
+            }, [name, className]);
+            return <span ref={iconRef} className="inline-flex items-center justify-center"></span>;
+        };
+
+        const ImageItem = ({ src, transition, fit = 'cover' }) => {
+            const [localSrc, setLocalSrc] = useState(src);
+            const [displaySrc, setDisplaySrc] = useState(src);
+            const [opacity, setOpacity] = useState(1);
+            const [scale, setScale] = useState(1);
+            const [translate, setTranslate] = useState(0);
+
+            useEffect(() => {
+                if (src !== localSrc) {
+                    setOpacity(0);
+                    if (transition === Transitions.ZOOM) setScale(1.1);
+                    if (transition === Transitions.SLIDE) setTranslate(-20);
+                    
+                    const timer = setTimeout(() => {
+                        setLocalSrc(src);
+                        setDisplaySrc(src);
+                        if (transition === Transitions.SLIDE) setTranslate(20);
+                        
+                        requestAnimationFrame(() => {
+                            setOpacity(1);
+                            setScale(1);
+                            setTranslate(0);
+                        });
+                    }, 800);
+                    return () => clearTimeout(timer);
+                }
+            }, [src, localSrc, transition]);
+
+            const transformStr = transition === Transitions.KEN_BURNS 
+                ? 'scale(1.1)' 
+                : `scale(${scale}) translateX(${translate}px)`;
+
+            const imageUrl = `/_abs/${encodeURIComponent(displaySrc)}`;
+
+            return (
+                <div className="w-full h-full relative overflow-hidden bg-slate-900 shadow-inner">
+                    {/* Blurred Background Layer (for Natural Fit mode) */}
+                    {fit === 'contain' && (
+                        <div 
+                            className="absolute inset-0 opacity-40 scale-110 blur-xl"
+                            style={{ 
+                                backgroundImage: `url("${imageUrl}")`,
+                                backgroundSize: 'cover',
+                                backgroundPosition: 'center',
+                                transition: 'opacity 1s ease-in-out'
+                            }}
+                        />
+                    )}
+
+                    <img 
+                        src={imageUrl}
+                        className={`w-full h-full transition-all duration-1000 ${transition === Transitions.KEN_BURNS ? 'ken-burns' : ''}`}
+                        style={{ 
+                            opacity: opacity,
+                            transform: transformStr,
+                            objectFit: fit
+                        }}
+                    />
+                    
+                    <div className="absolute inset-0 shadow-[inset_0_0_40px_rgba(0,0,0,0.3)] pointer-events-none"></div>
+                </div>
+            );
+        };
+
+        function App() {
+            const [allFiles, setAllFiles] = useState([]);
+            const [visibleFiles, setVisibleFiles] = useState([]);
+            const [folder, setFolder] = useState(localStorage.getItem("slideshow_folder") || "");
+            const [recursive, setRecursive] = useState(true);
+            const [isPlaying, setIsPlaying] = useState(false);
+            const [speed, setSpeed] = useState(5); // seconds
+            const [density, setDensity] = useState(3);
+            const [layoutStyle, setLayoutStyle] = useState('justified');
+            const [imageFit, setImageFit] = useState('cover');
+            const [shuffle, setShuffle] = useState(true);
+            const [transition, setTransition] = useState(Transitions.FADE);
+            const [isMenuOpen, setIsMenuOpen] = useState(true);
+            const [layout, setLayout] = useState([]);
+            const [fileAspects, setFileAspects] = useState({});
+            const [isLoading, setIsLoading] = useState(false);
+            const [controlsVisible, setControlsVisible] = useState(true);
+
+            const containerRef = useRef(null);
+            const rotationTimer = useRef(null);
+            const hideTimer = useRef(null);
+
+            const showControls = useCallback(() => {
+                setControlsVisible(true);
+                if (hideTimer.current) clearTimeout(hideTimer.current);
+                hideTimer.current = setTimeout(() => {
+                    setControlsVisible(false);
+                }, 3000);
+            }, []);
+
+            // Fetch files
+            const loadFiles = async () => {
+                await loadFilesWithParam(recursive);
+            };
+
+            const loadFilesWithParam = async (isRecursive) => {
+                if (!folder) return;
+                setIsLoading(true);
+                // Clear state to avoid mixing files
+                setAllFiles([]);
+                setLayout([]);
+                setFileAspects({});
+                
+                console.log(`[Slideshow] Loading folder: ${folder} (recursive: ${isRecursive})`);
+                
+                try {
+                    const res = await fetch('/api/slideshow/all_files', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ folder, recursive: isRecursive })
+                    });
+                    const data = await res.json();
+                    if (data.status === 'success') {
+                        console.log(`[Slideshow] Found ${data.files.length} files`);
+                        setAllFiles(data.files);
+                        localStorage.setItem("slideshow_folder", folder);
+                    } else {
+                        console.error(`[Slideshow] Error: ${data.error}`);
+                        alert(`Error: ${data.error}`);
+                    }
+                } catch (e) { 
+                    console.error(e); 
+                    alert(`Fetch error: ${e.message}`);
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+
+            // Aspect ratio cache logic
+            const getAspect = useCallback((path) => {
+                return fileAspects[path] ? fileAspects[path].ratio : 1.0; 
+            }, [fileAspects]);
+
+            const preloadAspects = async (files) => {
+                const newAspects = { ...fileAspects };
+                const targets = files.filter(f => !newAspects[f]).slice(0, 50);
+                
+                for (const f of targets) {
+                    try {
+                        const img = new Image();
+                        img.src = `/_abs/${encodeURIComponent(f)}`;
+                        await new Promise((resolve) => {
+                            img.onload = () => {
+                                newAspects[f] = {
+                                    ratio: img.width / img.height,
+                                    width: img.width,
+                                    height: img.height
+                                };
+                                resolve();
+                            };
+                            img.onerror = () => {
+                                newAspects[f] = { ratio: 1.0, width: 1000, height: 1000 };
+                                resolve();
+                            };
+                        });
+                    } catch { newAspects[f] = { ratio: 1.0, width: 1000, height: 1000 }; }
+                }
+                setFileAspects(newAspects);
+            };
+
+            // Unified Layout Engine
+            useEffect(() => {
+                if (allFiles.length === 0 || !containerRef.current) return;
+                
+                const stageWidth = containerRef.current.offsetWidth;
+                const stageHeight = containerRef.current.offsetHeight;
+                if (!stageWidth || !stageHeight) return;
+
+                const pool = shuffle ? [...allFiles].sort(() => Math.random() - 0.5) : [...allFiles];
+                const newLayout = [];
+
+                if (layoutStyle === 'justified') {
+                    // Vertical Containment: Row height is fixed to fit exactly into density
+                    const targetRowHeight = stageHeight / density;
+                    let currentRow = [];
+                    let currentWidth = 0;
+                    let topOffset = 0;
+                    let fileIdx = 0;
+
+                    // Only fill up to the density (number of rows)
+                    for (let r = 0; r < density && fileIdx < pool.length; r++) {
+                        currentRow = [];
+                        currentWidth = 0;
+
+                        // Add images to row until we hit the width
+                        while (fileIdx < pool.length) {
+                            const file = pool[fileIdx];
+                            const aspect = getAspect(file);
+                            const itemWidth = targetRowHeight * aspect;
+                            
+                            currentRow.push({ file, aspect });
+                            currentWidth += itemWidth;
+                            fileIdx++;
+
+                            if (currentWidth > stageWidth) break;
+                        }
+
+                        // Justify row to stageWidth
+                        const scale = stageWidth / currentWidth;
+                        let leftOffset = 0;
+                        currentRow.forEach(item => {
+                            const actualWidth = (targetRowHeight * item.aspect) * scale;
+                            const meta = fileAspects[item.file] || { width: 9999, height: 9999 };
+                            newLayout.push({ 
+                                file: item.file, 
+                                x: leftOffset, 
+                                y: topOffset, 
+                                w: actualWidth, 
+                                h: targetRowHeight,
+                                naturalWidth: meta.width,
+                                naturalHeight: meta.height
+                            });
+                            leftOffset += actualWidth;
+                        });
+                        topOffset += targetRowHeight;
+                    }
+                } else {
+                    // Perfectly Contained Organic (Masonry) Logic
+                    // 1. Build density columns, each normalized to stageHeight (or a constant like 1000)
+                    const targetHeight = 1000;
+                    const columns = [];
+                    let fileIdx = 0;
+
+                    for (let c = 0; c < density && fileIdx < pool.length; c++) {
+                        const colItems = [];
+                        let sumInvAspect = 0;
+                        
+                        // Pick enough images to fill a column (roughly)
+                        // In this "Perfectly Contained" mode, we'll try to balance files across columns
+                        const itemsPerCol = Math.ceil(pool.length / density);
+                        for (let i = 0; i < itemsPerCol && fileIdx < pool.length; i++) {
+                            const file = pool[fileIdx++];
+                            const aspect = getAspect(file);
+                            colItems.push({ file, aspect });
+                            sumInvAspect += (1 / aspect);
+                        }
+                        
+                        if (colItems.length > 0) {
+                            // Column Width needed to make total height = targetHeight
+                            const colWidth = targetHeight / sumInvAspect;
+                            columns.push({ items: colItems, width: colWidth });
+                        }
+                    }
+
+                    // 2. Calculate Total Grid Dimensions
+                    const totalGridWidth = columns.reduce((acc, col) => acc + col.width, 0);
+                    const totalGridHeight = targetHeight;
+
+                    // 3. Shrink-to-Fit Scaling
+                    const scaleW = stageWidth / totalGridWidth;
+                    const scaleH = stageHeight / totalGridHeight;
+                    const finalScale = Math.min(scaleW, scaleH);
+
+                    const finalGridWidth = totalGridWidth * finalScale;
+                    const finalGridHeight = totalGridHeight * finalScale;
+
+                    // 4. Centering
+                    const offsetX = (stageWidth - finalGridWidth) / 2;
+                    const offsetY = (stageHeight - finalGridHeight) / 2;
+
+                    // 5. Build Layout
+                    let currentX = offsetX;
+                    columns.forEach(col => {
+                        const actualColWidth = col.width * finalScale;
+                        let currentY = offsetY;
+                        col.items.forEach(item => {
+                            // height = width / aspect
+                            const actualItemHeight = (actualColWidth / item.aspect);
+                            const meta = fileAspects[item.file] || { width: 9999, height: 9999 };
+                            newLayout.push({
+                                file: item.file,
+                                x: currentX,
+                                y: currentY,
+                                w: actualColWidth,
+                                h: actualItemHeight,
+                                naturalWidth: meta.width,
+                                naturalHeight: meta.height
+                            });
+                            currentY += actualItemHeight;
+                        });
+                        currentX += actualColWidth;
+                    });
+                }
+
+                setLayout(newLayout);
+                setVisibleFiles(newLayout.map(l => l.file));
+            }, [allFiles, density, shuffle, fileAspects, layoutStyle]);
+
+            // Living Wall Rotation Logic
+            useEffect(() => {
+                if (!isPlaying || layout.length === 0 || allFiles.length <= layout.length) return;
+
+                rotationTimer.current = setInterval(() => {
+                    setLayout(prev => {
+                        const next = [...prev];
+                        // Pick random slot
+                        const slotIdx = Math.floor(Math.random() * next.length);
+                        
+                        // Find a file not currently visible
+                        const visibleSet = new Set(next.map(n => n.file));
+                        const pool = allFiles.filter(f => !visibleSet.has(f));
+                        
+                        if (pool.length > 0) {
+                            const newFile = pool[Math.floor(Math.random() * pool.length)];
+                            next[slotIdx] = { ...next[slotIdx], file: newFile };
+                        }
+                        return next;
+                    });
+                }, speed * 1000);
+
+                return () => clearInterval(rotationTimer.current);
+            }, [isPlaying, speed, allFiles, layout.length]);
+
+            // Initial Load - Handled once on mount
+            useEffect(() => {
+                const savedFolder = localStorage.getItem("slideshow_folder");
+                if (savedFolder && allFiles.length === 0) {
+                    setFolder(savedFolder);
+                    setTimeout(() => loadFilesWithParam(recursive), 100);
+                }
+                
+                showControls(); // Start with controls visible
+
+                const handleKey = (e) => {
+                    if (e.key === ' ') setIsPlaying(!isPlaying);
+                    if (e.key === 'm') setIsMenuOpen(!isMenuOpen);
+                    if (e.key === 'f') document.documentElement.requestFullscreen();
+                };
+                window.addEventListener('keydown', handleKey);
+                return () => {
+                    window.removeEventListener('keydown', handleKey);
+                    if (hideTimer.current) clearTimeout(hideTimer.current);
+                };
+            }, []);
+
+            // Auto-preload aspects for visible files and some buffer
+            useEffect(() => {
+                if (allFiles.length > 0) preloadAspects(allFiles);
+            }, [allFiles]);
+
+            return (
+                <div 
+                    className="slideshow-container bg-black overflow-hidden" 
+                    ref={containerRef}
+                    onMouseMove={showControls}
+                    onClick={showControls}
+                >
+                    {/* The Wall */}
+                    <div className="wall-layer">
+                        {layout.map((item, idx) => (
+                            <div 
+                                key={idx}
+                                className="image-slot"
+                                style={{
+                                    left: item.x,
+                                    top: item.y,
+                                    width: item.w + 1,
+                                    height: item.h + 1,
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center'
+                                }}
+                            >
+                                <div style={{
+                                    width: Math.min(item.w, item.naturalWidth),
+                                    height: Math.min(item.h, item.naturalHeight),
+                                    position: 'relative'
+                                }}>
+                                    <ImageItem 
+                                        src={item.file} 
+                                        transition={transition}
+                                        fit={imageFit}
+                                    />
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+
+                    {/* Controls Overlay */}
+                    <div 
+                        onMouseEnter={() => { if (hideTimer.current) clearTimeout(hideTimer.current); }}
+                        onMouseLeave={showControls}
+                        className={`fixed bottom-8 left-1/2 -translate-x-1/2 z-50 transition-all duration-700 ease-in-out ${controlsVisible && isMenuOpen ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-16 scale-95 pointer-events-none'}`}
+                    >
+                        <div className="glass rounded-[2rem] px-8 py-4 flex items-center gap-8 shadow-2xl border border-white/10">
+                            <div className="flex flex-col gap-1 pr-6 border-r border-white/10">
+                                <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">Source</span>
+                                <div className="flex items-center gap-3">
+                                    <input 
+                                        type="text" 
+                                        value={folder}
+                                        onChange={(e) => setFolder(e.target.value)}
+                                        onKeyDown={(e) => e.key === 'Enter' && loadFiles()}
+                                        placeholder="C:/Photos/..."
+                                        className="bg-transparent text-[11px] font-bold text-white focus:outline-none w-48 placeholder:text-slate-700"
+                                    />
+                                    <button onClick={loadFiles} className={`transition-all ${isLoading ? 'animate-spin text-slate-500' : 'text-amber-500 hover:text-amber-400'}`}>
+                                        <LucideIcon name="refresh-cw" className="w-3.5 h-3.5" />
+                                    </button>
+                                </div>
+                            </div>
+
+                            <button 
+                                onClick={() => setIsPlaying(!isPlaying)}
+                                className={`w-12 h-12 rounded-2xl flex items-center justify-center transition-all ${isPlaying ? 'bg-amber-500 text-black shadow-lg shadow-amber-500/20' : 'bg-white/5 text-white hover:bg-white/10'}`}
+                            >
+                                <LucideIcon name={isPlaying ? "pause" : "play"} className="w-6 h-6 fill-current" />
+                            </button>
+
+                            <div className="flex items-center gap-6">
+                                <div className="flex flex-col gap-2 w-24">
+                                    <div className="flex justify-between text-[9px] font-bold text-slate-500 uppercase tracking-tighter">
+                                        <span>Interval</span>
+                                        <span className="text-amber-500">{speed}s</span>
+                                    </div>
+                                    <input type="range" min="1" max="60" value={speed} onChange={(e) => setSpeed(Number(e.target.value))} className="accent-amber-500 h-1 bg-white/10 rounded-lg appearance-none cursor-pointer" />
+                                </div>
+
+                                <div className="flex flex-col gap-1 items-center bg-white/5 rounded-2xl p-2 border border-white/5">
+                                    <span className="text-[9px] font-bold text-slate-500 uppercase tracking-tighter">Density</span>
+                                    <div className="flex items-center gap-3 px-1">
+                                        <button onClick={() => setDensity(Math.max(1, density - 1))} className="text-slate-400 hover:text-white transition-colors">
+                                            <LucideIcon name="minus-circle" className="w-5 h-5" />
+                                        </button>
+                                        <span className="text-lg font-black w-4 text-center text-amber-500">{density}</span>
+                                        <button onClick={() => setDensity(Math.min(10, density + 1))} className="text-slate-400 hover:text-white transition-colors">
+                                            <LucideIcon name="plus-circle" className="w-5 h-5" />
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div className="flex items-center gap-4 border-l border-white/10 pl-6">
+                                    <button 
+                                        onClick={() => setLayoutStyle(prev => prev === 'justified' ? 'masonry' : 'justified')} 
+                                        className={`p-2 rounded-xl transition-all flex flex-col items-center gap-0.5 ${layoutStyle === 'masonry' ? 'text-amber-500 bg-amber-500/10' : 'text-slate-500 hover:text-white'}`}
+                                        title="Switch Layout Style"
+                                    >
+                                        <LucideIcon name={layoutStyle === 'justified' ? "layout-grid" : "layout-template"} className="w-4 h-4" />
+                                        <span className="text-[7px] font-black uppercase opacity-60 tracking-tighter">{layoutStyle === 'justified' ? 'Magazine' : 'Organic'}</span>
+                                    </button>
+
+                                    <button 
+                                        onClick={() => setImageFit(prev => prev === 'cover' ? 'contain' : 'cover')} 
+                                        className={`p-2 rounded-xl transition-all flex flex-col items-center gap-0.5 ${imageFit === 'contain' ? 'text-amber-500 bg-amber-500/10' : 'text-slate-500 hover:text-white'}`}
+                                        title="Toggle Fit / Crop"
+                                    >
+                                        <LucideIcon name={imageFit === 'cover' ? "maximize-2" : "minimize-2"} className="w-4 h-4" />
+                                        <span className="text-[7px] font-black uppercase opacity-60 tracking-tighter">{imageFit === 'cover' ? 'Crop' : 'Natural'}</span>
+                                    </button>
+
+                                    <button onClick={() => {
+                                        const next = !recursive;
+                                        setRecursive(next);
+                                        loadFilesWithParam(next);
+                                    }} className={`p-2 rounded-xl transition-all flex flex-col items-center gap-0.5 ${recursive ? 'text-amber-500 bg-amber-500/10' : 'text-slate-500 hover:text-white'}`} title="Include Subfolders">
+                                        <LucideIcon name="folder-tree" className="w-4 h-4" />
+                                        <span className="text-[7px] font-black uppercase opacity-60 tracking-tighter">Subfolders</span>
+                                    </button>
+                                    <button onClick={() => setShuffle(!shuffle)} className={`p-2 rounded-xl transition-all ${shuffle ? 'text-amber-500 bg-amber-500/10' : 'text-slate-500'}`} title="Shuffle">
+                                        <LucideIcon name="shuffle" className="w-4 h-4" />
+                                    </button>
+                                    <button onClick={() => setTransition(prev => {
+                                        const keys = Object.values(Transitions);
+                                        const idx = (keys.indexOf(prev) + 1) % keys.length;
+                                        return keys[idx];
+                                    })} className="p-2 text-slate-400 hover:text-white transition-all flex flex-col items-center gap-0.5" title="Transition Style">
+                                        <LucideIcon name="layers" className="w-4 h-4" />
+                                        <span className="text-[7px] font-black uppercase opacity-60 tracking-tighter">{transition.replace('_', ' ')}</span>
+                                    </button>
+                                    <button onClick={() => document.documentElement.requestFullscreen()} className="p-2 text-slate-400 hover:text-white transition-all">
+                                        <LucideIcon name="maximize" className="w-4 h-4" />
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* HUD Status */}
+                    {!controlsVisible && isMenuOpen && (
+                        <div className="fixed top-6 right-6 z-50 flex items-center gap-3 transition-opacity duration-1000">
+                            <div className="glass px-4 py-1.5 rounded-full text-[10px] font-black text-amber-500/30 uppercase tracking-[0.2em] shadow-2xl">
+                                {isPlaying ? 'Playing' : 'Paused'} • {speed}s Interval
+                            </div>
+                        </div>
+                    )}
+                    
+                    {/* Empty State / Loading */}
+                    {(allFiles.length === 0 || isLoading) && (
+                        <div className="flex-1 flex flex-col items-center justify-center gap-6">
+                            <div className={`w-24 h-24 rounded-[2.5rem] bg-gradient-to-br from-amber-400 to-orange-600 flex items-center justify-center shadow-2xl ${isLoading ? 'animate-spin' : 'animate-pulse'}`}>
+                                <LucideIcon name={isLoading ? "refresh-cw" : "image"} className="w-12 h-12 text-white" />
+                            </div>
+                            <div className="text-center">
+                                <h1 className="text-2xl font-black text-white mb-2 uppercase tracking-tight">{isLoading ? 'Loading Media...' : 'The Living Wall'}</h1>
+                                <p className="text-slate-500 text-sm font-medium">
+                                    {isLoading ? `Scanning ${folder}...` : 'Enter a folder path in the controls below to begin'}
+                                </p>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>

@@ -343,6 +343,7 @@
             const [batchIndex, setBatchIndex] = useState(-1);
             const [batchTotal, setBatchTotal] = useState(0);
             const [batchCurrentPath, setBatchCurrentPath] = useState("");
+            const [schemaError, setSchemaError] = useState(null);
 
             // Detect if the source folder input contains a .txt file path
             const isQueueMode = organizedPath.trim().toLowerCase().endsWith('.txt');
@@ -509,23 +510,26 @@
                 if (organizedPath) updateBackendRoot(organizedPath);
             }, []);
 
-            // Fetch param schema from backend and initialize defaults
             useEffect(() => {
                 fetch(`${serverUrl}/api/schema?t=${Date.now()}`)
                     .then(r => r.json())
                     .then(schema => {
+                        if (!Array.isArray(schema)) {
+                            console.error('Invalid schema format:', schema);
+                            setSchemaError(schema.error || "Parameter engine failed to initialize.");
+                            return;
+                        }
+                        setSchemaError(null);
                         setParamSchema(schema);
                         const defaults = {};
                         const pluginDefaults = {};
                         schema.forEach(p => {
                             defaults[p.key] = p.default;
                             if (p.is_plugin) {
-                                // Correctly respect the default boolean/number value from schema
                                 pluginDefaults[p.key] = p.type === 'bool' ? p.default : (p.default > 0);
                             }
                         });
 
-                        // Enforce mutual exclusivity for initial plugin states
                         if (pluginDefaults['enable_folder_flattening']) {
                             pluginDefaults['enable_ai_clustering'] = false;
                             pluginDefaults['group_name_matches'] = false;
@@ -535,13 +539,17 @@
                         setAiParams(prev => ({ ...defaults, ...prev }));
                         setEnabledPlugins(prev => ({ ...pluginDefaults, ...prev }));
                     })
-                    .catch(err => console.warn('Schema fetch failed, using defaults:', err));
+                    .catch(err => {
+                        console.warn('Schema fetch failed:', err);
+                        setSchemaError("Could not connect to Parameter Engine helper.");
+                    });
             }, [serverUrl]);
 
             // Handle AI Mode Switching (Persistence)
             useEffect(() => {
                 const currentMode = aiParams.ai_clustering_mode || 'individual';
                 if (currentMode === prevMode) return;
+                if (!Array.isArray(paramSchema)) return;
 
                 const clusteringKeys = paramSchema
                     .filter(p => p.group === 'clustering' || p.group === 'weights')
@@ -789,12 +797,14 @@
             // Group schema entries by their group field
             const schemaGroups = useMemo(() => {
                 const groups = {};
-                paramSchema.forEach(p => {
-                    if (p.key === 'dry_run') return; // Handled by Simulate/Execute buttons
-                    const g = p.group || 'other';
-                    if (!groups[g]) groups[g] = [];
-                    groups[g].push(p);
-                });
+                if (Array.isArray(paramSchema)) {
+                    paramSchema.forEach(p => {
+                        if (p.key === 'dry_run') return; // Handled by Simulate/Execute buttons
+                        const g = p.group || 'other';
+                        if (!groups[g]) groups[g] = [];
+                        groups[g].push(p);
+                    });
+                }
                 return groups;
             }, [paramSchema]);
 
@@ -899,16 +909,18 @@
                 await updateBackendRoot(organizedPath);
 
                 // Override disabled plugins: send 0 for weights, false for bools
-                paramSchema.forEach(p => {
-                    if (p.is_plugin) {
-                        const isEnabled = enabledPlugins[p.key] !== false;
-                        if (p.type === 'bool') {
-                            finalParams[p.key] = isEnabled;
-                        } else if (!isEnabled) {
-                            finalParams[p.key] = 0;
+                if (Array.isArray(paramSchema)) {
+                    paramSchema.forEach(p => {
+                        if (p.is_plugin) {
+                            const isEnabled = enabledPlugins[p.key] !== false;
+                            if (p.type === 'bool') {
+                                finalParams[p.key] = isEnabled;
+                            } else if (!isEnabled) {
+                                finalParams[p.key] = 0;
+                            }
                         }
-                    }
-                });
+                    });
+                }
 
                 try {
                     const res = await fetch(`${serverUrl}/api/run`, {
@@ -1114,16 +1126,18 @@
 
                 // 2. Build params (same as runOrganizer)
                 const finalParams = { ...aiParams, dry_run: dryRun };
-                paramSchema.forEach(p => {
-                    if (p.is_plugin) {
-                        const isEnabled = enabledPlugins[p.key] !== false;
-                        if (p.type === 'bool') {
-                            finalParams[p.key] = isEnabled;
-                        } else if (!isEnabled) {
-                            finalParams[p.key] = 0;
+                if (Array.isArray(paramSchema)) {
+                    paramSchema.forEach(p => {
+                        if (p.is_plugin) {
+                            const isEnabled = enabledPlugins[p.key] !== false;
+                            if (p.type === 'bool') {
+                                finalParams[p.key] = isEnabled;
+                            } else if (!isEnabled) {
+                                finalParams[p.key] = 0;
+                            }
                         }
-                    }
-                });
+                    });
+                }
 
                 // 3. Fire the run
                 try {
@@ -1499,6 +1513,13 @@
                                             <LucideIcon name="external-link" className="w-4 h-4 text-slate-500" />
                                             Browse Logs Folder
                                         </button>
+                                        <button
+                                            onClick={() => window.open('slideshow.html', '_blank')}
+                                            className="w-full px-4 py-2.5 text-left text-[11px] font-bold text-slate-300 hover:bg-white/5 flex items-center gap-3 transition-colors"
+                                        >
+                                            <LucideIcon name="palette" className="w-4 h-4 text-amber-500" />
+                                            Slideshow Viewer
+                                        </button>
                                         <div className="h-px bg-white/5 my-1 mx-2"></div>
                                         <button
                                             onClick={() => window.open('downloads.html', '_blank')}
@@ -1689,7 +1710,23 @@
 
                                             const isAiEnabled = enabledPlugins['enable_ai_clustering'] !== false || enabledPlugins['enable_color_features'] === true;
 
-                                            return sortedGroups.map(([groupName, params]) => {
+                                            return (
+                                                <div className="space-y-6">
+                                                    {schemaError && (
+                                                        <div className="bg-rose-500/10 border border-rose-500/20 rounded-2xl p-6 mb-8 animate-pulse">
+                                                            <div className="flex items-center gap-3 text-rose-500 mb-2">
+                                                                <LucideIcon name="alert-triangle" className="w-5 h-5" />
+                                                                <span className="text-[10px] font-black uppercase tracking-widest">Parameter Engine Error</span>
+                                                            </div>
+                                                            <p className="text-[11px] font-bold text-slate-400 leading-relaxed italic">
+                                                                "{schemaError}"
+                                                            </p>
+                                                            <p className="text-[9px] text-slate-600 mt-4 leading-relaxed">
+                                                                This usually happens if the backend is busy or if a library is missing. Try refreshing the page.
+                                                            </p>
+                                                        </div>
+                                                    )}
+                                                    {sortedGroups.map(([groupName, params]) => {
                                                 // Accordion: Hide AI-dependent groups if AI is disabled
                                                 const isFlatteningEnabled = enabledPlugins['enable_folder_flattening'] === true;
                                                 const isAiDependent = groupName === 'clustering' || groupName === 'weights';
@@ -1721,7 +1758,9 @@
                                                         )}
                                                     </div>
                                                 );
-                                            });
+                                                    })}
+                                                </div>
+                                            );
                                         })()}
                                     </section>
 
@@ -1745,7 +1784,7 @@
                             ) : (
                                 <div className="pipeline-tree py-2">
                                     <PipelineNode phase="Phase 01" title="Filter & Pre-sort" icon="filter">
-                                        {paramSchema.filter(p => p.key === 'enable_video_sorting').map(p => renderPluginCard(p))}
+                                        {(Array.isArray(paramSchema) ? paramSchema : []).filter(p => p.key === 'enable_video_sorting').map(p => renderPluginCard(p))}
                                         
                                         {/* Perceptual Video Deduplication Sub-section */}
                                         <div className="bg-white/5 p-4 rounded-xl border border-white/5 space-y-3 mt-2">
@@ -1753,22 +1792,22 @@
                                                 <LucideIcon name="eye" className="w-2.5 h-2.5" />
                                                 Video Analysis
                                             </div>
-                                            {paramSchema.filter(p => p.key === 'enable_perceptual_video_dedup' || p.key === 'enable_deep_video_scan').map(p => renderPluginCard(p))}
+                                            {paramSchema && (Array.isArray(paramSchema) ? paramSchema : []).filter(p => p.key === 'enable_perceptual_video_dedup' || p.key === 'enable_deep_video_scan').map(p => renderPluginCard(p))}
                                             <div className="space-y-4 mt-2">
-                                                {paramSchema.filter(p => p.key === 'video_match_threshold' || p.key === 'video_max_workers').map(p => renderParamControl(p))}
+                                                {(Array.isArray(paramSchema) ? paramSchema : []).filter(p => p.key === 'video_match_threshold' || p.key === 'video_max_workers').map(p => renderParamControl(p))}
                                             </div>
                                         </div>
                                     </PipelineNode>
 
                                     <PipelineNode phase="Phase 02" title="Media Integrity" icon="shield-check">
                                         <div className="grid gap-4">
-                                            {paramSchema.filter(p => p.key === 'enable_deduplication' || p.key === 'enable_video_deduplication').map(p => renderPluginCard(p))}
+                                            {(Array.isArray(paramSchema) ? paramSchema : []).filter(p => p.key === 'enable_deduplication' || p.key === 'enable_video_deduplication').map(p => renderPluginCard(p))}
                                             <div className="bg-white/5 p-3 rounded-xl border border-white/5">
                                                 <div className="text-[7px] font-black text-slate-500 uppercase tracking-widest mb-2 px-1 flex items-center gap-1.5 opacity-60">
                                                     <LucideIcon name="list-tree" className="w-2 h-2" />
                                                     Priority System
                                                 </div>
-                                                {paramSchema.filter(p => p.key === 'dedup_priority').map(p => renderParamControl(p))}
+                                                {(Array.isArray(paramSchema) ? paramSchema : []).filter(p => p.key === 'dedup_priority').map(p => renderParamControl(p))}
                                             </div>
                                         </div>
                                     </PipelineNode>

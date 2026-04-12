@@ -128,6 +128,8 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                     SCHEMA_CACHE["time"] = now
                     self.send_json(200, media_organizer.PARAM_SCHEMA)
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 self.send_json(500, {"error": str(e)})
         elif self.path == '/api/status_job' or self.path.startswith('/api/status_job?'):
             self.send_json(200, {"running": IS_RUNNING})
@@ -745,6 +747,37 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                 threading.Thread(target=run_gdl).start()
                 self.send_json(200, {"status": "launched"})
             except Exception as e:
+                self.send_json(500, {"error": str(e)})
+
+        elif self.path == '/api/slideshow/all_files':
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                params = json.loads(post_data)
+                folder_str = params.get('folder', '').strip()
+                recursive = params.get('recursive', True)
+                
+                if not folder_str:
+                    self.send_json(400, {"error": "Folder path is required"})
+                    return
+                
+                base_path = Path(folder_str)
+                if not base_path.exists():
+                    self.send_json(404, {"error": f"Folder not found: {folder_str}"})
+                    return
+
+                extensions = {'.jpg', '.jpeg', '.png', '.gif', '.webp'}
+                files = []
+                
+                pattern = "**/*" if recursive else "*"
+                for p in base_path.glob(pattern):
+                    if p.is_file() and p.suffix.lower() in extensions:
+                        files.append(str(p).replace('\\', '/'))
+                
+                print(f"[API] Slideshow: Found {len(files)} items in {folder_str} (recursive={recursive})")
+                self.send_json(200, {"status": "success", "files": files})
+            except Exception as e:
+                print(f"[API ERR] Slideshow: {e}")
                 self.send_json(500, {"error": str(e)})
 
         elif self.path == '/api/downloads/update':
