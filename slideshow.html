@@ -68,6 +68,30 @@
 
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { 
+            background: rgba(255, 255, 255, 0.1); 
+            border-radius: 10px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.2); }
+
+        @keyframes rollup {
+            from { transform: translateY(10px) scale(0.95); opacity: 0; }
+            to { transform: translateY(0) scale(1); opacity: 1; }
+        }
+        .animate-rollup {
+            animation: rollup 0.3s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+        }
+
+        .pulse {
+            animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 0.1; }
+            50% { opacity: 0.3; }
+        }
     </style>
 </head>
 <body>
@@ -83,6 +107,21 @@
             KEN_BURNS: 'ken_burns'
         };
 
+        const shuffleArray = (array) => {
+            const arr = [...array];
+            for (let i = arr.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [arr[i], arr[j]] = [arr[j], arr[i]];
+            }
+            return arr;
+        };
+
+        const isVideoFile = (path) => {
+            if (!path) return false;
+            const ext = path.toLowerCase().split('.').pop();
+            return ['mp4', 'mov', 'webm', 'mkv', 'm4v', 'avi'].includes(ext);
+        };
+
         const LucideIcon = ({ name, className = "w-4 h-4" }) => {
             const iconRef = useRef(null);
             useEffect(() => {
@@ -94,14 +133,45 @@
             return <span ref={iconRef} className="inline-flex items-center justify-center"></span>;
         };
 
-        const ImageItem = ({ src, transition, fit = 'cover' }) => {
+        const MediaItem = ({ src, transition, fit = 'cover', onEnded }) => {
             const [localSrc, setLocalSrc] = useState(src);
             const [displaySrc, setDisplaySrc] = useState(src);
             const [opacity, setOpacity] = useState(1);
             const [scale, setScale] = useState(1);
             const [translate, setTranslate] = useState(0);
+            const [hasLoaded, setHasLoaded] = useState(false);
+            const [retryCount, setRetryCount] = useState(0);
+            const mediaRef = useRef(null);
+            const retryTimer = useRef(null);
+
+            const isVideo = useMemo(() => isVideoFile(src), [src]);
+
+            const handleError = useCallback(() => {
+                if (retryCount < 5) {
+                    console.warn(`[Slideshow] Load failed for ${src}. Retrying (${retryCount + 1}/5)...`);
+                    if (retryTimer.current) clearTimeout(retryTimer.current);
+                    retryTimer.current = setTimeout(() => {
+                        setRetryCount(prev => prev + 1);
+                    }, 1500 + (retryCount * 1000));
+                }
+            }, [src, retryCount]);
+
+            // Sync hasLoaded if file is already in cache
+            useEffect(() => {
+                if (mediaRef.current) {
+                    if (isVideo) {
+                        if (mediaRef.current.readyState >= 3) setHasLoaded(true);
+                    } else {
+                        if (mediaRef.current.complete) setHasLoaded(true);
+                    }
+                }
+            }, [displaySrc, isVideo, retryCount]);
 
             useEffect(() => {
+                setHasLoaded(false);
+                setRetryCount(0);
+                if (retryTimer.current) clearTimeout(retryTimer.current);
+                
                 if (src !== localSrc) {
                     setOpacity(0);
                     if (transition === Transitions.ZOOM) setScale(1.1);
@@ -122,38 +192,146 @@
                 }
             }, [src, localSrc, transition]);
 
+            useEffect(() => {
+                return () => { if (retryTimer.current) clearTimeout(retryTimer.current); };
+            }, []);
+
             const transformStr = transition === Transitions.KEN_BURNS 
                 ? 'scale(1.1)' 
                 : `scale(${scale}) translateX(${translate}px)`;
 
-            const imageUrl = `/_abs/${encodeURIComponent(displaySrc)}`;
+            const mediaUrl = `/_abs/${encodeURIComponent(displaySrc)}${retryCount > 0 ? `?retry=${retryCount}` : ''}`;
 
             return (
                 <div className="w-full h-full relative overflow-hidden bg-slate-900 shadow-inner">
-                    {/* Blurred Background Layer (for Natural Fit mode) */}
-                    {fit === 'contain' && (
+                    {/* Loading State Overlay */}
+                    {!hasLoaded && (
+                        <div className="absolute inset-x-8 inset-y-12 rounded-3xl bg-white/5 pulse border border-white/5 flex items-center justify-center">
+                             <LucideIcon name={isVideo ? "video" : "image"} className="w-8 h-8 text-white/10" />
+                        </div>
+                    )}
+
+                    {/* Blurred Background Layer */}
+                    {fit === 'contain' && hasLoaded && (
                         <div 
-                            className="absolute inset-0 opacity-40 scale-110 blur-xl"
+                            className="absolute inset-0 opacity-40 scale-110 blur-xl animate-in fade-in duration-1000"
                             style={{ 
-                                backgroundImage: `url("${imageUrl}")`,
+                                backgroundImage: `url("${mediaUrl}")`,
                                 backgroundSize: 'cover',
-                                backgroundPosition: 'center',
-                                transition: 'opacity 1s ease-in-out'
+                                backgroundPosition: 'center'
                             }}
                         />
                     )}
 
-                    <img 
-                        src={imageUrl}
-                        className={`w-full h-full transition-all duration-1000 ${transition === Transitions.KEN_BURNS ? 'ken-burns' : ''}`}
-                        style={{ 
-                            opacity: opacity,
-                            transform: transformStr,
-                            objectFit: fit
-                        }}
-                    />
+                    {isVideo ? (
+                        <video 
+                            ref={mediaRef}
+                            key={mediaUrl}
+                            src={mediaUrl}
+                            autoPlay
+                            muted
+                            onEnded={onEnded}
+                            playsInline
+                            onLoadedData={() => setHasLoaded(true)}
+                            onError={handleError}
+                            className={`w-full h-full transition-all duration-1000 ${transition === Transitions.KEN_BURNS ? 'ken-burns' : ''}`}
+                            style={{ 
+                                opacity: hasLoaded ? opacity : 0,
+                                transform: transformStr,
+                                objectFit: fit
+                            }}
+                        />
+                    ) : (
+                        <img 
+                            ref={mediaRef}
+                            key={mediaUrl}
+                            src={mediaUrl}
+                            onLoad={() => setHasLoaded(true)}
+                            onError={handleError}
+                            className={`w-full h-full transition-all duration-1000 ${transition === Transitions.KEN_BURNS ? 'ken-burns' : ''}`}
+                            style={{ 
+                                opacity: hasLoaded ? opacity : 0,
+                                transform: transformStr,
+                                objectFit: fit
+                            }}
+                        />
+                    )}
                     
                     <div className="absolute inset-0 shadow-[inset_0_0_40px_rgba(0,0,0,0.3)] pointer-events-none"></div>
+                </div>
+            );
+        };
+
+        const SourceManager = ({ sources, onToggle, onRemove, onAdd, isOpen, onClose }) => {
+            const [newPath, setNewPath] = useState("");
+            
+            if (!isOpen) return null;
+
+            return (
+                <div className="absolute bottom-24 left-0 glass rounded-3xl p-6 w-96 shadow-2xl border border-white/10 z-[100] animate-rollup">
+                    <div className="flex items-center justify-between mb-4">
+                        <span className="text-xs font-black uppercase tracking-widest text-slate-400">Library Sources</span>
+                        <button onClick={onClose} className="text-slate-500 hover:text-white transition-colors">
+                            <LucideIcon name="x" className="w-4 h-4" />
+                        </button>
+                    </div>
+
+                    <div className="flex flex-col gap-2 max-h-64 overflow-y-auto custom-scrollbar pr-2 mb-4">
+                        {sources.length === 0 && (
+                            <div className="py-8 text-center text-slate-600 text-[10px] font-bold uppercase tracking-widest border-2 border-dashed border-white/5 rounded-2xl">
+                                No Sources Added
+                            </div>
+                        )}
+                        {sources.map((src, i) => (
+                            <div key={i} className="flex items-center gap-3 bg-white/5 p-2 rounded-xl group hover:bg-white/10 transition-all border border-white/5">
+                                <input 
+                                    type="checkbox" 
+                                    checked={src.enabled} 
+                                    onChange={() => onToggle(i)}
+                                    className="w-4 h-4 rounded border-white/10 bg-black/40 accent-amber-500 transition-all cursor-pointer"
+                                />
+                                <span 
+                                    className={`text-[10px] font-bold flex-1 truncate transition-opacity ${src.enabled ? 'text-white' : 'text-slate-600'}`}
+                                    title={src.path}
+                                >
+                                    {src.path}
+                                </span>
+                                <button 
+                                    onClick={() => onRemove(i)}
+                                    className="opacity-0 group-hover:opacity-100 p-1.5 hover:bg-red-500/20 hover:text-red-500 text-slate-500 rounded-lg transition-all"
+                                >
+                                    <LucideIcon name="trash-2" className="w-3.5 h-3.5" />
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+
+                    <div className="flex items-center gap-2 bg-black/20 p-1 rounded-2xl border border-white/5 focus-within:border-amber-500/50 transition-all">
+                        <input 
+                            type="text" 
+                            value={newPath}
+                            onChange={(e) => setNewPath(e.target.value)}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter' && newPath.trim()) {
+                                    onAdd(newPath.trim());
+                                    setNewPath("");
+                                }
+                            }}
+                            placeholder="Add folder path..."
+                            className="bg-transparent text-[10px] font-bold text-white focus:outline-none flex-1 px-3 py-2 placeholder:text-slate-700"
+                        />
+                        <button 
+                            onClick={() => {
+                                if (newPath.trim()) {
+                                    onAdd(newPath.trim());
+                                    setNewPath("");
+                                }
+                            }}
+                            className="bg-amber-500 hover:bg-amber-400 text-black p-2 rounded-xl transition-all shadow-lg shadow-amber-500/20"
+                        >
+                            <LucideIcon name="plus" className="w-4 h-4" />
+                        </button>
+                    </div>
                 </div>
             );
         };
@@ -161,8 +339,10 @@
         function App() {
             const [allFiles, setAllFiles] = useState([]);
             const [visibleFiles, setVisibleFiles] = useState([]);
-            const [folder, setFolder] = useState(localStorage.getItem("slideshow_folder") || "");
+            const [sources, setSources] = useState([]);
+            const [isSourceMenuOpen, setIsSourceMenuOpen] = useState(false);
             const [recursive, setRecursive] = useState(true);
+            const [includeVideos, setIncludeVideos] = useState(localStorage.getItem("slideshow_videos") === "true");
             const [isPlaying, setIsPlaying] = useState(false);
             const [speed, setSpeed] = useState(5); // seconds
             const [density, setDensity] = useState(3);
@@ -174,6 +354,7 @@
             const [layout, setLayout] = useState([]);
             const [fileAspects, setFileAspects] = useState({});
             const [isLoading, setIsLoading] = useState(false);
+            const [scanningPath, setScanningPath] = useState("");
             const [controlsVisible, setControlsVisible] = useState(true);
 
             const containerRef = useRef(null);
@@ -188,42 +369,98 @@
                 }, 3000);
             }, []);
 
+            const triggerRotation = useCallback((slotIdx) => {
+                if (!isPlaying) return;
+                setLayout(prev => {
+                    if (slotIdx < 0 || slotIdx >= prev.length) return prev;
+                    const next = [...prev];
+                    
+                    const visibleSet = new Set(next.map(n => n.file));
+                    const pool = allFiles.filter(f => !visibleSet.has(f));
+                    
+                    if (pool.length > 0) {
+                        const newFile = pool[Math.floor(Math.random() * pool.length)];
+                        next[slotIdx] = { ...next[slotIdx], file: newFile };
+                    }
+                    return next;
+                });
+            }, [allFiles, isPlaying]);
+
             // Fetch files
             const loadFiles = async () => {
                 await loadFilesWithParam(recursive);
             };
 
-            const loadFilesWithParam = async (isRecursive) => {
-                if (!folder) return;
+            const loadFilesWithParam = async (isRecursive, doIncludeVideos = includeVideos, overrideSources = null) => {
+                const currentSources = overrideSources || sources;
+                const activeSources = currentSources.filter(s => s.enabled).map(s => s.path);
+                if (activeSources.length === 0) {
+                    setAllFiles([]);
+                    return;
+                }
+                
                 setIsLoading(true);
-                // Clear state to avoid mixing files
+                setScanningPath("");
                 setAllFiles([]);
                 setLayout([]);
                 setFileAspects({});
                 
-                console.log(`[Slideshow] Loading folder: ${folder} (recursive: ${isRecursive})`);
+                console.log(`[Slideshow] Loading active sources:`, activeSources);
                 
                 try {
-                    const res = await fetch('/api/slideshow/all_files', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ folder, recursive: isRecursive })
-                    });
-                    const data = await res.json();
-                    if (data.status === 'success') {
-                        console.log(`[Slideshow] Found ${data.files.length} files`);
-                        setAllFiles(data.files);
-                        localStorage.setItem("slideshow_folder", folder);
-                    } else {
-                        console.error(`[Slideshow] Error: ${data.error}`);
-                        alert(`Error: ${data.error}`);
+                    let combinedFiles = [];
+                    for (const folder of activeSources) {
+                        setScanningPath(folder);
+                        const res = await fetch('/api/slideshow/all_files', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ 
+                                folders: [folder], 
+                                recursive: isRecursive,
+                                include_videos: doIncludeVideos
+                            })
+                        });
+                        const data = await res.json();
+                        if (data.status === 'success') {
+                            combinedFiles = [...combinedFiles, ...data.files];
+                        }
                     }
+                    
+                    const uniqueFiles = [...new Set(combinedFiles)];
+                    console.log(`[Slideshow] Found ${uniqueFiles.length} unique items`);
+                    setAllFiles(uniqueFiles);
+                    localStorage.setItem("slideshow_sources", JSON.stringify(currentSources));
+                    localStorage.setItem("slideshow_videos", doIncludeVideos);
                 } catch (e) { 
                     console.error(e); 
-                    alert(`Fetch error: ${e.message}`);
                 } finally {
                     setIsLoading(false);
+                    setScanningPath("");
                 }
+            };
+
+            const toggleSource = (idx) => {
+                const next = [...sources];
+                next[idx].enabled = !next[idx].enabled;
+                setSources(next);
+                localStorage.setItem("slideshow_sources", JSON.stringify(next));
+                // Reload with current settings
+                setTimeout(() => loadFilesWithParam(recursive, includeVideos), 10);
+            };
+
+            const removeSource = (idx) => {
+                const next = sources.filter((_, i) => i !== idx);
+                setSources(next);
+                localStorage.setItem("slideshow_sources", JSON.stringify(next));
+                setTimeout(() => loadFilesWithParam(recursive, includeVideos), 10);
+            };
+
+            const addSource = (path) => {
+                if (sources.some(s => s.path === path)) return;
+                const next = [...sources, { path, enabled: true }];
+                setSources(next);
+                localStorage.setItem("slideshow_sources", JSON.stringify(next));
+                setTimeout(() => loadFilesWithParam(recursive, includeVideos), 10);
             };
 
             // Aspect ratio cache logic
@@ -266,7 +503,7 @@
                 const stageHeight = containerRef.current.offsetHeight;
                 if (!stageWidth || !stageHeight) return;
 
-                const pool = shuffle ? [...allFiles].sort(() => Math.random() - 0.5) : [...allFiles];
+                const pool = shuffle ? shuffleArray(allFiles) : [...allFiles];
                 const newLayout = [];
 
                 if (layoutStyle === 'justified') {
@@ -300,15 +537,12 @@
                         let leftOffset = 0;
                         currentRow.forEach(item => {
                             const actualWidth = (targetRowHeight * item.aspect) * scale;
-                            const meta = fileAspects[item.file] || { width: 9999, height: 9999 };
                             newLayout.push({ 
                                 file: item.file, 
                                 x: leftOffset, 
                                 y: topOffset, 
                                 w: actualWidth, 
-                                h: targetRowHeight,
-                                naturalWidth: meta.width,
-                                naturalHeight: meta.height
+                                h: targetRowHeight
                             });
                             leftOffset += actualWidth;
                         });
@@ -316,70 +550,40 @@
                     }
                 } else {
                     // Perfectly Contained Organic (Masonry) Logic
-                    // 1. Build density columns, each normalized to stageHeight (or a constant like 1000)
-                    const targetHeight = 1000;
-                    const columns = [];
+                    const colWidth = stageWidth / density;
                     let fileIdx = 0;
 
                     for (let c = 0; c < density && fileIdx < pool.length; c++) {
                         const colItems = [];
-                        let sumInvAspect = 0;
+                        let colSumAspectInv = 0;
                         
-                        // Pick enough images to fill a column (roughly)
-                        // In this "Perfectly Contained" mode, we'll try to balance files across columns
-                        const itemsPerCol = Math.ceil(pool.length / density);
-                        for (let i = 0; i < itemsPerCol && fileIdx < pool.length; i++) {
+                        // Fill column until we hit the height
+                        while (fileIdx < pool.length) {
                             const file = pool[fileIdx++];
                             const aspect = getAspect(file);
                             colItems.push({ file, aspect });
-                            sumInvAspect += (1 / aspect);
+                            colSumAspectInv += (1 / aspect);
+                            
+                            // Estimate current height
+                            const estHeight = colWidth * colSumAspectInv;
+                            if (estHeight > stageHeight) break;
                         }
                         
-                        if (colItems.length > 0) {
-                            // Column Width needed to make total height = targetHeight
-                            const colWidth = targetHeight / sumInvAspect;
-                            columns.push({ items: colItems, width: colWidth });
-                        }
-                    }
-
-                    // 2. Calculate Total Grid Dimensions
-                    const totalGridWidth = columns.reduce((acc, col) => acc + col.width, 0);
-                    const totalGridHeight = targetHeight;
-
-                    // 3. Shrink-to-Fit Scaling
-                    const scaleW = stageWidth / totalGridWidth;
-                    const scaleH = stageHeight / totalGridHeight;
-                    const finalScale = Math.min(scaleW, scaleH);
-
-                    const finalGridWidth = totalGridWidth * finalScale;
-                    const finalGridHeight = totalGridHeight * finalScale;
-
-                    // 4. Centering
-                    const offsetX = (stageWidth - finalGridWidth) / 2;
-                    const offsetY = (stageHeight - finalGridHeight) / 2;
-
-                    // 5. Build Layout
-                    let currentX = offsetX;
-                    columns.forEach(col => {
-                        const actualColWidth = col.width * finalScale;
-                        let currentY = offsetY;
-                        col.items.forEach(item => {
-                            // height = width / aspect
-                            const actualItemHeight = (actualColWidth / item.aspect);
-                            const meta = fileAspects[item.file] || { width: 9999, height: 9999 };
+                        // Justify column to stageHeight
+                        const scale = stageHeight / (colWidth * colSumAspectInv);
+                        let topOffset = 0;
+                        colItems.forEach(item => {
+                            const itemHeight = (colWidth / item.aspect) * scale;
                             newLayout.push({
                                 file: item.file,
-                                x: currentX,
-                                y: currentY,
-                                w: actualColWidth,
-                                h: actualItemHeight,
-                                naturalWidth: meta.width,
-                                naturalHeight: meta.height
+                                x: c * colWidth,
+                                y: topOffset,
+                                w: colWidth,
+                                h: itemHeight
                             });
-                            currentY += actualItemHeight;
+                            topOffset += itemHeight;
                         });
-                        currentX += actualColWidth;
-                    });
+                    }
                 }
 
                 setLayout(newLayout);
@@ -393,8 +597,16 @@
                 rotationTimer.current = setInterval(() => {
                     setLayout(prev => {
                         const next = [...prev];
-                        // Pick random slot
-                        const slotIdx = Math.floor(Math.random() * next.length);
+                        
+                        // Pick random slot, excluding those currently playing videos
+                        const eligibleIndices = next
+                            .map((item, idx) => ({ file: item.file, idx }))
+                            .filter(({ file }) => !isVideoFile(file))
+                            .map(({ idx }) => idx);
+                        
+                        if (eligibleIndices.length === 0) return prev;
+                        
+                        const slotIdx = eligibleIndices[Math.floor(Math.random() * eligibleIndices.length)];
                         
                         // Find a file not currently visible
                         const visibleSet = new Set(next.map(n => n.file));
@@ -413,10 +625,26 @@
 
             // Initial Load - Handled once on mount
             useEffect(() => {
-                const savedFolder = localStorage.getItem("slideshow_folder");
-                if (savedFolder && allFiles.length === 0) {
-                    setFolder(savedFolder);
-                    setTimeout(() => loadFilesWithParam(recursive), 100);
+                let initSources = [];
+                const savedSources = localStorage.getItem("slideshow_sources");
+                const legacyFolders = localStorage.getItem("slideshow_folders") || localStorage.getItem("slideshow_folder");
+
+                if (savedSources) {
+                    try { initSources = JSON.parse(savedSources); } catch(e) {}
+                } else if (legacyFolders) {
+                    // Migrate legacy format
+                    initSources = legacyFolders.split(/[\n,]/)
+                        .map(f => f.trim())
+                        .filter(f => f)
+                        .map(p => ({ path: p, enabled: true }));
+                }
+
+                if (initSources.length > 0) {
+                    setSources(initSources);
+                    // Minimal delay to ensure state is set before loading
+                    setTimeout(() => {
+                        loadFilesWithParam(recursive, includeVideos, initSources);
+                    }, 50);
                 }
                 
                 showControls(); // Start with controls visible
@@ -455,23 +683,15 @@
                                     left: item.x,
                                     top: item.y,
                                     width: item.w + 1,
-                                    height: item.h + 1,
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'center'
+                                    height: item.h + 1
                                 }}
                             >
-                                <div style={{
-                                    width: Math.min(item.w, item.naturalWidth),
-                                    height: Math.min(item.h, item.naturalHeight),
-                                    position: 'relative'
-                                }}>
-                                    <ImageItem 
-                                        src={item.file} 
-                                        transition={transition}
-                                        fit={imageFit}
-                                    />
-                                </div>
+                                <MediaItem 
+                                    src={item.file} 
+                                    transition={transition}
+                                    fit={imageFit}
+                                    onEnded={() => triggerRotation(idx)}
+                                />
                             </div>
                         ))}
                     </div>
@@ -483,19 +703,31 @@
                         className={`fixed bottom-8 left-1/2 -translate-x-1/2 z-50 transition-all duration-700 ease-in-out ${controlsVisible && isMenuOpen ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-16 scale-95 pointer-events-none'}`}
                     >
                         <div className="glass rounded-[2rem] px-8 py-4 flex items-center gap-8 shadow-2xl border border-white/10">
-                            <div className="flex flex-col gap-1 pr-6 border-r border-white/10">
-                                <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">Source</span>
+                            <div className="flex flex-col gap-1 pr-6 border-r border-white/10 relative">
+                                <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">Sources</span>
                                 <div className="flex items-center gap-3">
-                                    <input 
-                                        type="text" 
-                                        value={folder}
-                                        onChange={(e) => setFolder(e.target.value)}
-                                        onKeyDown={(e) => e.key === 'Enter' && loadFiles()}
-                                        placeholder="C:/Photos/..."
-                                        className="bg-transparent text-[11px] font-bold text-white focus:outline-none w-48 placeholder:text-slate-700"
+                                    <button 
+                                        onClick={() => setIsSourceMenuOpen(!isSourceMenuOpen)}
+                                        className={`flex items-center gap-2 px-4 py-2 rounded-2xl bg-white/5 border border-white/5 hover:bg-white/10 transition-all ${isSourceMenuOpen ? 'border-amber-500/50 text-amber-500' : 'text-white'}`}
+                                    >
+                                        <LucideIcon name="library" className="w-4 h-4" />
+                                        <span className="text-[10px] font-black uppercase tracking-tight">
+                                            {sources.filter(s => s.enabled).length} Active
+                                        </span>
+                                        <LucideIcon name={isSourceMenuOpen ? "chevron-down" : "chevron-up"} className="w-3.5 h-3.5 opacity-50" />
+                                    </button>
+                                    
+                                    <SourceManager 
+                                        sources={sources}
+                                        isOpen={isSourceMenuOpen}
+                                        onClose={() => setIsSourceMenuOpen(false)}
+                                        onToggle={toggleSource}
+                                        onRemove={removeSource}
+                                        onAdd={addSource}
                                     />
+
                                     <button onClick={loadFiles} className={`transition-all ${isLoading ? 'animate-spin text-slate-500' : 'text-amber-500 hover:text-amber-400'}`}>
-                                        <LucideIcon name="refresh-cw" className="w-3.5 h-3.5" />
+                                        <LucideIcon name="refresh-cw" className="w-4 h-4" />
                                     </button>
                                 </div>
                             </div>
@@ -556,6 +788,15 @@
                                         <LucideIcon name="folder-tree" className="w-4 h-4" />
                                         <span className="text-[7px] font-black uppercase opacity-60 tracking-tighter">Subfolders</span>
                                     </button>
+
+                                    <button onClick={() => {
+                                        const next = !includeVideos;
+                                        setIncludeVideos(next);
+                                        loadFilesWithParam(recursive, next);
+                                    }} className={`p-2 rounded-xl transition-all flex flex-col items-center gap-0.5 ${includeVideos ? 'text-amber-500 bg-amber-500/10' : 'text-slate-500 hover:text-white'}`} title="Include Videos">
+                                        <LucideIcon name="video" className="w-4 h-4" />
+                                        <span className="text-[7px] font-black uppercase opacity-60 tracking-tighter">Videos</span>
+                                    </button>
                                     <button onClick={() => setShuffle(!shuffle)} className={`p-2 rounded-xl transition-all ${shuffle ? 'text-amber-500 bg-amber-500/10' : 'text-slate-500'}`} title="Shuffle">
                                         <LucideIcon name="shuffle" className="w-4 h-4" />
                                     </button>
@@ -593,7 +834,12 @@
                             <div className="text-center">
                                 <h1 className="text-2xl font-black text-white mb-2 uppercase tracking-tight">{isLoading ? 'Loading Media...' : 'The Living Wall'}</h1>
                                 <p className="text-slate-500 text-sm font-medium">
-                                    {isLoading ? `Scanning ${folder}...` : 'Enter a folder path in the controls below to begin'}
+                                    {isLoading ? (
+                                        <span className="flex flex-col items-center gap-2">
+                                            <span>Scanning sources...</span>
+                                            {scanningPath && <span className="text-[10px] font-mono text-amber-500/60 truncate max-w-md px-10">{scanningPath}</span>}
+                                        </span>
+                                    ) : 'Enter folder paths in the controls below to begin'}
                                 </p>
                             </div>
                         </div>

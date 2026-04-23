@@ -23,6 +23,55 @@ SCHEMA_CACHE_TTL = 2  # 2 second cache to prevent flood reloads
 DOWNLOAD_IS_RUNNING = False
 DOWNLOAD_LOG = []
 DOWNLOAD_HISTORY_FILE = SCRIPT_DIR / "download_history.json"
+MEDIA_METADATA_CACHE_FILE = SCRIPT_DIR / "logs" / "media_metadata_cache.json"
+
+def get_video_info(file_path):
+    """Get width, height, and duration of a video using ffprobe, accounting for rotation."""
+    try:
+        cmd = [
+            'ffprobe', 
+            '-v', 'error', 
+            '-select_streams', 'v:0',
+            '-show_entries', 'stream=width,height,duration:stream_tags=rotate:stream_side_data=displaymatrix', 
+            '-of', 'json', 
+            str(file_path)
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        data = json.loads(result.stdout)
+        
+        if 'streams' in data and len(data['streams']) > 0:
+            stream = data['streams'][0]
+            width = int(stream.get('width', 0))
+            height = int(stream.get('height', 0))
+            
+            # Duration can be in the stream or format
+            duration_str = stream.get('duration') or data.get('format', {}).get('duration', '0')
+            duration = float(duration_str)
+            
+            # Check for rotation in tags
+            rotation = 0
+            tags = stream.get('tags', {})
+            if 'rotate' in tags:
+                try: rotation = int(tags['rotate'])
+                except: pass
+            
+            # Check for rotation in side_data (newer ffprobe)
+            if not rotation:
+                side_data = stream.get('side_data', [])
+                for sd in side_data:
+                    # 'side_data_type' vs 'rotation' field
+                    if sd.get('side_data_type') == 'Display Matrix' or 'rotation' in sd:
+                        try: rotation = int(sd.get('rotation', 0))
+                        except: pass
+            
+            # Swap width/height if rotated 90 or 270 degrees
+            if abs(rotation) in [90, 270]:
+                width, height = height, width
+                
+            return {"width": width, "height": height, "duration": duration, "rotation": rotation}
+    except Exception as e:
+        print(f"[FFPROBE ERR] {file_path}: {e}")
+    return None
 
 class ThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     def handle_error(self, request, client_address):
@@ -61,6 +110,7 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        print(f" [GET] {self.path}")
         if self.path == '/api/status':
             self.send_json(200, {
                 "status": "connected",
@@ -69,46 +119,84 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                 "exists": CURRENT_ROOT.exists()
             })
         elif self.path.startswith('/_abs/'):
-            # Experimental: Serve absolute path for Virtual Mode (Dry Runs)
-            # URL format: /_abs/C:/Users/...
             try:
-                # 1. Extract the encoded path segment
                 encoded_abs_path = self.path[6:]
-                # 2. Decode it (e.g. %20 -> space, %3A -> :)
-                abs_path_str = urllib.parse.unquote(urllib.parse.unquote(encoded_abs_path))
-                # 3. Handle potential leading slash from URL resolving
+                # Split at ? to remove query params like ?retry=1
+                clean_path = encoded_abs_path.split('?')[0]
+                abs_path_str = urllib.parse.unquote(clean_path)
+                
                 if abs_path_str.startswith('/') and ':' in abs_path_str:
                     abs_path_str = abs_path_str[1:]
                 
                 full_path = Path(abs_path_str)
-                
-                if full_path.exists() and full_path.is_file():
-                    # Robust MIME type detection
-                    content_type, _ = mimetypes.guess_type(str(full_path))
-                    if not content_type:
-                        content_type = 'application/octet-stream'
+                if not (full_path.exists() and full_path.is_file()):
+                    self.send_error(404, "File not found")
+                    return
 
+                content_type, _ = mimetypes.guess_type(str(full_path))
+                if not content_type: content_type = 'application/octet-stream'
+                file_size = full_path.stat().st_size
+
+                # Handle Range Requests (Very important for Video)
+                range_header = self.headers.get('Range')
+                start_byte = 0
+                end_byte = file_size - 1
+                is_partial = False
+
+                if range_header and range_header.startswith('bytes='):
+                    try:
+                        is_partial = True
+                        range_str = range_header[6:]
+                        if '-' in range_str:
+                            s, e = range_str.split('-')
+                            if s: start_byte = int(s)
+                            if e: end_byte = int(e)
+                        
+                        if start_byte >= file_size:
+                            self.send_response(416) # Range Not Satisfiable
+                            self.end_headers()
+                            return
+                        
+                        # Fix end_byte if it's beyond file size
+                        if end_byte >= file_size:
+                            end_byte = file_size - 1
+                    except:
+                        is_partial = False
+
+                chunk_length = end_byte - start_byte + 1
+
+                if is_partial:
+                    self.send_response(206)
+                    self.send_header('Content-Type', content_type)
+                    self.send_header('Content-Range', f'bytes {start_byte}-{end_byte}/{file_size}')
+                    self.send_header('Content-Length', str(chunk_length))
+                else:
                     self.send_response(200)
                     self.send_header('Content-Type', content_type)
-                    # Add Content-Length for better browser progress tracking
-                    self.send_header('Content-Length', str(full_path.stat().st_size))
-                    self.end_headers()
-                    
-                    # Stream the file in chunks instead of reading into memory
-                    try:
-                        with open(full_path, 'rb') as f:
-                            shutil.copyfileobj(f, self.wfile, length=64*1024) # 64KB buffer
-                        print(f"  [STREAM] {full_path} ({content_type})")
-                    except (ConnectionAbortedError, ConnectionResetError):
-                        # Expected when browser cancels a request (e.g. on scroll)
-                        pass
-                else:
-                    self.send_error(404, "File not found")
-                    print(f"  [STREAM MISS] {full_path}")
-            except Exception as e:
-                print(f"  [STREAM ERR] {e}")
+                    self.send_header('Content-Length', str(file_size))
+                
+                self.send_header('Accept-Ranges', 'bytes')
+                self.end_headers()
+
+                # Stream only the requested chunk
                 try:
-                    self.send_error(500, str(e))
+                    with open(full_path, 'rb') as f:
+                        if start_byte > 0: f.seek(start_byte)
+                        remaining = chunk_length
+                        while remaining > 0:
+                            chunk_size = min(remaining, 64 * 1024)
+                            data = f.read(chunk_size)
+                            if not data: break
+                            try:
+                                self.wfile.write(data)
+                            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+                                break
+                            remaining -= len(data)
+                except Exception as stream_err:
+                    print(f"  [STREAM ERR] {full_path.name}: {stream_err}")
+            except Exception as e:
+                print(f"  [HANDLER ERR] {e}")
+                try: self.send_error(500, str(e))
                 except: pass
         elif self.path == '/api/schema' or self.path.startswith('/api/schema?'):
             try:
@@ -791,36 +879,92 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_json(200, {"status": "launched"})
             except Exception as e:
                 self.send_json(500, {"error": str(e)})
-
         elif self.path == '/api/slideshow/all_files':
             content_length = int(self.headers.get('Content-Length', 0))
             post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
             try:
                 params = json.loads(post_data)
-                folder_str = params.get('folder', '').strip()
+                folders = params.get('folders', [])
+                single_folder = params.get('folder', '').strip()
+                if not folders and single_folder:
+                    folders = [single_folder]
                 recursive = params.get('recursive', True)
-                
-                if not folder_str:
-                    self.send_json(400, {"error": "Folder path is required"})
+                include_videos = params.get('include_videos', False)
+                if not folders:
+                    self.send_json(400, {"error": "At least one folder path is required"})
                     return
+                cache = {}
+                if MEDIA_METADATA_CACHE_FILE.exists():
+                    try:
+                        with open(MEDIA_METADATA_CACHE_FILE, "r", encoding="utf-8") as f:
+                            cache = json.load(f)
+                    except: pass
+                image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.webp'}
+                video_extensions = {'.mp4', '.mov', '.webm', '.mkv', '.m4v', '.avi'} if include_videos else set()
+                all_found_files = []
+                cache_updated = False
+                video_stats = {"found": 0, "portrait": 0, "short": 0, "accepted": 0}
                 
-                base_path = Path(folder_str)
-                if not base_path.exists():
-                    self.send_json(404, {"error": f"Folder not found: {folder_str}"})
-                    return
+                for folder_str in folders:
+                    if not folder_str: continue
+                    base_path = Path(folder_str).resolve()
+                    if not base_path.exists():
+                        print(f"[API] Slideshow: Folder NOT FOUND: {folder_str}")
+                        continue
 
-                extensions = {'.jpg', '.jpeg', '.png', '.gif', '.webp'}
-                files = []
+                    pattern = "**/*" if recursive else "*"
+                    for p in base_path.glob(pattern):
+                        if not p.is_file():
+                            continue
+                            
+                        ext = p.suffix.lower()
+                        p_str = str(p).replace('\\', '/')
+                        
+                        if ext in image_extensions:
+                            all_found_files.append(p_str)
+                        elif ext in video_extensions:
+                            video_stats["found"] += 1
+                            # Check cache first
+                            info = cache.get(p_str)
+                            if not info:
+                                info = get_video_info(p)
+                                if info:
+                                    cache[p_str] = info
+                                    cache_updated = True
+                            
+                            if info:
+                                # Vertical/Portrait: Height > Width
+                                is_portrait = info.get('height', 0) > info.get('width', 0)
+                                is_short = info.get('duration', 0) <= 30
+                                
+                                if is_portrait: video_stats["portrait"] += 1
+                                if is_short: video_stats["short"] += 1
+                                
+                                if is_portrait and is_short:
+                                    all_found_files.append(p_str)
+                                    video_stats["accepted"] += 1
+
+                # Save cache if needed
+                if cache_updated:
+                    try:
+                        MEDIA_METADATA_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+                        with open(MEDIA_METADATA_CACHE_FILE, "w", encoding="utf-8") as f:
+                            json.dump(cache, f, indent=2)
+                    except: pass
+
+                # Deduplicate
+                files = list(dict.fromkeys(all_found_files))
                 
-                pattern = "**/*" if recursive else "*"
-                for p in base_path.glob(pattern):
-                    if p.is_file() and p.suffix.lower() in extensions:
-                        files.append(str(p).replace('\\', '/'))
+                print(f"[API] Slideshow: Found {len(files)} items across {len(folders)} sources (videos={include_videos})")
+                if include_videos:
+                    print(f"      [VIDEO STATS] Found: {video_stats['found']}, Portrait: {video_stats['portrait']}, Short: {video_stats['short']} -> Accepted: {video_stats['accepted']}")
                 
-                print(f"[API] Slideshow: Found {len(files)} items in {folder_str} (recursive={recursive})")
                 self.send_json(200, {"status": "success", "files": files})
+
             except Exception as e:
+                import traceback
                 print(f"[API ERR] Slideshow: {e}")
+                print(traceback.format_exc())
                 self.send_json(500, {"error": str(e)})
 
         elif self.path == '/api/downloads/update':
