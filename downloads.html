@@ -97,7 +97,7 @@
             const [isUpdating, setIsUpdating] = useState(false);
             const [history, setHistory] = useState([]);
             const [leftTab, setLeftTab] = useState('queue'); // 'queue' | 'history'
-            const [serverUrl] = useState("http://localhost:8000");
+            const [serverUrl] = useState(window.location.origin);
             const logEndRef = useRef(null);
 
             const scrollToBottom = () => {

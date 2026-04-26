@@ -321,7 +321,7 @@
             const [duplicateViewMode, setDuplicateViewMode] = useState('rows'); // 'grid' or 'rows'
             const [gridSize, setGridSize] = useState(6);
             const [lightboxItem, setLightboxItem] = useState(null);
-            const [serverUrl, setServerUrl] = useState("http://localhost:8000");
+            const [serverUrl] = useState(window.location.origin);
             const [serverStatus, setServerStatus] = useState("unknown");
             const [settings, setSettings] = useState(null);
             const [progressLog, setProgressLog] = useState([]);
