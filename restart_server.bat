@@ -6,9 +6,9 @@ echo ========================================
 echo   Restarting Media Visualizer Server
 echo ========================================
 
-:: Find and kill any process listening on port 8000
-echo Checking for existing server on port 8000...
-for /f "tokens=5" %%a in ('netstat -aon ^| findstr :8000 ^| findstr LISTENING') do (
+:: Find and kill any process listening on port 8888
+echo Checking for existing server on port 8888...
+for /f "tokens=5" %%a in ('netstat -aon ^| findstr :8888 ^| findstr LISTENING') do (
     echo Killing existing process PID: %%a
     taskkill /f /pid %%a >nul 2>&1
 )

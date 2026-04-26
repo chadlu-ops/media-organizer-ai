@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Slideshow V2 — Stateful Grid</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;900&display=swap');
+        body {
+            font-family: 'Outfit', sans-serif;
+            background-color: #020617;
+            color: #f8fafc;
+            overflow: hidden;
+            margin: 0;
+        }
+        .glass {
+            background: rgba(15, 23, 42, 0.7);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .grid-container {
+            width: 100vw;
+            height: 100vh;
+            position: relative;
+            background: #000;
+        }
+        .slot {
+            position: absolute;
+            overflow: hidden;
+            transition: all 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .media-container {
+            width: 100%;
+            height: 100%;
+            position: relative;
+        }
+        .media-content {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transition: opacity 1.5s ease-in-out;
+        }
+        .media-enter { opacity: 0; transform: scale(1.05); }
+        .media-enter-active { opacity: 1; transform: scale(1); }
+
+        .progress-bar {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            height: 3px;
+            background: #f59e0b;
+            transition: width linear;
+        }
+
+        @keyframes pulse-slow {
+            0%, 100% { opacity: 0.2; }
+            50% { opacity: 0.4; }
+        }
+        .slot-loading {
+            background: #1e293b;
+            animation: pulse-slow 2s infinite;
+        }
+
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { 
+            background: rgba(255, 255, 255, 0.1); 
+            border-radius: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useMemo, useCallback } = React;
+
+        const LucideIcon = ({ name, className = "w-4 h-4" }) => {
+            const iconRef = useRef(null);
+            useEffect(() => {
+                if (iconRef.current && window.lucide) {
+                    iconRef.current.innerHTML = `<i data-lucide="${name}" class="${className}"></i>`;
+                    lucide.createIcons({ root: iconRef.current });
+                }
+            }, [name, className]);
+            return <span ref={iconRef} className="inline-flex items-center justify-center"></span>;
+        };
+
+        const MediaItem = ({ media, isPlaying, duration, imageFit, onComplete }) => {
+            const videoRef = useRef(null);
+            const [loaded, setLoaded] = useState(false);
+            const [progress, setProgress] = useState(0);
+
+            const jitteredDuration = useMemo(() => {
+                // Use a stable jitter for this specific media instance to prevent "pumping" 
+                // but keep it relative to the global duration
+                return duration * (0.8 + Math.random() * 0.4);
+            }, [duration, media.path]);
+
+            useEffect(() => {
+                if (media.type === 'image' && isPlaying) {
+                    const timer = setTimeout(onComplete, jitteredDuration);
+                    return () => clearTimeout(timer);
+                }
+            }, [media, isPlaying, jitteredDuration, onComplete]);
+
+            useEffect(() => {
+                if (media.type === 'video' && videoRef.current) {
+                    if (isPlaying) videoRef.current.play().catch(() => {});
+                    else videoRef.current.pause();
+                }
+            }, [isPlaying, media.type]);
+
+            const handleVideoTimeUpdate = () => {
+                if (videoRef.current) {
+                    const p = (videoRef.current.currentTime / videoRef.current.duration) * 100;
+                    setProgress(p);
+                }
+            };
+
+            const mediaUrl = `/_abs/${encodeURIComponent(media.path)}`;
+
+            return (
+                <div className="media-container bg-black">
+                    {media.type === 'video' ? (
+                        <video 
+                            ref={videoRef}
+                            src={mediaUrl}
+                            autoPlay
+                            muted
+                            playsInline
+                            className={`media-content ${loaded ? 'opacity-100' : 'opacity-0'}`}
+                            style={{ objectFit: imageFit }}
+                            onLoadedData={() => setLoaded(true)}
+                            onTimeUpdate={handleVideoTimeUpdate}
+                            onEnded={onComplete}
+                        />
+                    ) : (
+                        <img 
+                            key={media.path}
+                            src={mediaUrl}
+                            className={`media-content ${loaded ? 'opacity-100' : 'opacity-0'}`}
+                            style={{ objectFit: imageFit }}
+                            onLoad={() => setLoaded(true)}
+                        />
+                    )}
+                    {media.type === 'video' && (
+                        <div className="progress-bar" style={{ width: `${progress}%` }} />
+                    )}
+                </div>
+            );
+        };
+
+        const GridSlot = ({ slot, mediaPool, landscapePool, portraitPool, isPlaying, rotationSpeed, imageFit, onRebuild }) => {
+            const [item, setItem] = useState(null);
+            const [failCount, setFailCount] = useState(0);
+            const rotateTimerRef = useRef(null);
+            
+            // Unique pace for this slot (0.7x to 1.4x of global speed)
+            // This ensures slots naturally drift apart and never form "waves"
+            const paceMultiplier = useMemo(() => 0.7 + Math.random() * 0.7, []);
+
+            const rotate = useCallback(() => {
+                if (!isPlaying) return;
+                
+                const targetIsPortrait = slot.ratio < 1;
+                const pool = targetIsPortrait ? portraitPool : landscapePool;
+                
+                if (pool.length > 0) {
+                    const newItem = pool[Math.floor(Math.random() * pool.length)];
+                    setItem(newItem);
+                    setFailCount(0);
+                } else {
+                    setFailCount(prev => {
+                        const next = prev + 1;
+                        if (next >= 3) {
+                            console.warn(`Slot ${slot.id} failed to find orientation match 3 times. Rebuilding grid...`);
+                            onRebuild();
+                        }
+                        return next;
+                    });
+                    // If no match, try rotating again sooner
+                    rotateTimerRef.current = setTimeout(rotate, 2000);
+                }
+            }, [landscapePool, portraitPool, isPlaying, slot.ratio, onRebuild]);
+
+            useEffect(() => {
+                if (mediaPool.length === 0) return;
+                // Initial stagger using the slot's unique pace multiplier
+                const delay = Math.random() * rotationSpeed * 1000 * paceMultiplier;
+                rotateTimerRef.current = setTimeout(rotate, delay);
+                return () => clearTimeout(rotateTimerRef.current);
+            }, []); 
+
+            const handleComplete = () => {
+                rotate();
+            };
+
+            const overlap = imageFit === 'contain' ? 1.1 : 1.0;
+            const w = slot.w * overlap;
+            const h = slot.h * overlap;
+            const x = slot.x - (w - slot.w) / 2;
+            const y = slot.y - (h - slot.h) / 2;
+
+            return (
+                <div 
+                    className="absolute transition-all duration-800" 
+                    style={{ left: x, top: y, width: w, height: h, zIndex: item ? 10 : 0 }}
+                >
+                    <div className={`w-full h-full overflow-hidden shadow-2xl transition-all duration-500 ${imageFit === 'contain' ? 'rounded-xl' : ''} ${!item ? 'slot-loading' : ''}`}>
+                        {item && (
+                            <MediaItem 
+                                media={item} 
+                                isPlaying={isPlaying} 
+                                duration={rotationSpeed * 1000 * paceMultiplier}
+                                imageFit={imageFit}
+                                onComplete={handleComplete} 
+                            />
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        const SourceManager = ({ sources, onToggle, onRemove, onAdd, isOpen, onClose }) => {
+            const [newPath, setNewPath] = useState("");
+            if (!isOpen) return null;
+
+            return (
+                <div className="absolute bottom-24 left-0 glass rounded-3xl p-6 w-96 shadow-2xl border border-white/10 z-[100] animate-in fade-in slide-in-from-bottom-4 duration-300">
+                    <div className="flex items-center justify-between mb-4">
+                        <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Library Sources</span>
+                        <button onClick={onClose} className="text-slate-500 hover:text-white transition-colors">
+                            <LucideIcon name="x" className="w-4 h-4" />
+                        </button>
+                    </div>
+                    <div className="flex flex-col gap-2 max-h-64 overflow-y-auto custom-scrollbar pr-2 mb-4">
+                        {sources.map((src, i) => (
+                            <div key={i} className="flex items-center gap-3 bg-white/5 p-2 rounded-xl group hover:bg-white/10 transition-all border border-white/5">
+                                <input type="checkbox" checked={src.enabled} onChange={() => onToggle(i)} className="w-4 h-4 rounded border-white/10 bg-black/40 accent-amber-500 cursor-pointer" />
+                                <span className={`text-[10px] font-bold flex-1 truncate ${src.enabled ? 'text-white' : 'text-slate-600'}`}>{src.path}</span>
+                                <button onClick={() => onRemove(i)} className="opacity-0 group-hover:opacity-100 p-1.5 hover:bg-red-500/20 hover:text-red-500 text-slate-500 rounded-lg transition-all">
+                                    <LucideIcon name="trash-2" className="w-3.5 h-3.5" />
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                    <div className="flex items-center gap-2 bg-black/20 p-1 rounded-2xl border border-white/5 focus-within:border-amber-500/50">
+                        <input 
+                            type="text" 
+                            value={newPath} 
+                            onChange={(e) => setNewPath(e.target.value)} 
+                            onKeyDown={(e) => e.key === 'Enter' && (onAdd(newPath), setNewPath(""))}
+                            placeholder="Add folder path..." 
+                            className="bg-transparent text-[10px] font-bold text-white focus:outline-none flex-1 px-3 py-2 placeholder:text-slate-700" 
+                        />
+                        <button onClick={() => (onAdd(newPath), setNewPath(""))} className="bg-amber-500 hover:bg-amber-400 text-black p-2 rounded-xl transition-all"><LucideIcon name="plus" className="w-4 h-4" /></button>
+                    </div>
+                </div>
+            );
+        };
+
+        function App() {
+            const [mediaPool, setMediaPool] = useState([]);
+            const [sources, setSources] = useState([]);
+            const [isPlaying, setIsPlaying] = useState(true);
+            const [density, setDensity] = useState(3);
+            const [imageFit, setImageFit] = useState('cover');
+            const [rotationSpeed, setRotationSpeed] = useState(10);
+            const [maxDuration, setMaxDuration] = useState(30);
+            const [includeVideos, setIncludeVideos] = useState(true);
+            const [recursive, setRecursive] = useState(true);
+            const [isLoading, setIsLoading] = useState(false);
+            const [scanningPath, setScanningPath] = useState("");
+            const [isSourceMenuOpen, setIsSourceMenuOpen] = useState(false);
+            const [showControls, setShowControls] = useState(true);
+            const [slots, setSlots] = useState([]);
+            const controlsTimerRef = useRef(null);
+
+            const containerRef = useRef(null);
+
+            const landscapePool = useMemo(() => mediaPool.filter(m => m.ratio >= 1), [mediaPool]);
+            const portraitPool = useMemo(() => mediaPool.filter(m => m.ratio < 1), [mediaPool]);
+
+            // Layout Engine - Justified Partition with Height Normalization
+            const generateLayout = useCallback(() => {
+                if (!containerRef.current || mediaPool.length === 0) return;
+                
+                const width = containerRef.current.offsetWidth;
+                const height = containerRef.current.offsetHeight;
+                const rows = [];
+                
+                const targetRowHeight = height / Math.max(1, density);
+                const startIdx = Math.floor(Math.random() * mediaPool.length);
+                const sampleSize = 100; // Larger sample to ensure we fill the screen
+                
+                let currentRow = [];
+                let currentRowWidth = 0;
+                let accumulatedHeight = 0;
+
+                for (let i = 0; i < sampleSize; i++) {
+                    const item = mediaPool[(startIdx + i) % mediaPool.length];
+                    currentRow.push(item);
+                    currentRowWidth += item.ratio * targetRowHeight;
+
+                    // If row is full, finalize it
+                    if (currentRowWidth > width * 0.9) {
+                        const scale = width / currentRowWidth;
+                        const finalHeight = targetRowHeight * scale;
+                        
+                        rows.push({ items: currentRow, height: finalHeight });
+                        accumulatedHeight += finalHeight;
+                        
+                        currentRow = [];
+                        currentRowWidth = 0;
+
+                        // Stop once we have enough rows to cover the height
+                        if (accumulatedHeight > height * 0.95) break;
+                    }
+                }
+
+                // Handle leftover items in the final row if we didn't reach the bottom
+                if (currentRow.length > 0 && accumulatedHeight < height) {
+                    const totalRatio = currentRow.reduce((acc, i) => acc + i.ratio, 0);
+                    const finalHeight = width / totalRatio; // Height that would make these items fill the width
+                    rows.push({ items: currentRow, height: finalHeight });
+                    accumulatedHeight += finalHeight;
+                }
+
+                // Normalization: Scale all row heights so sum(heights) === viewport height
+                const globalScale = height / accumulatedHeight;
+                const newSlots = [];
+                let currentY = 0;
+
+                for (const row of rows) {
+                    const normalizedHeight = row.height * globalScale;
+                    let currentX = 0;
+                    const rowTotalRatio = row.items.reduce((acc, i) => acc + i.ratio, 0);
+                    
+                    for (const item of row.items) {
+                        // Recalculate width based on normalized height and item ratio
+                        // We use the item's share of the row's total ratio to ensure we fill the width exactly
+                        const itemWidth = (item.ratio / rowTotalRatio) * width;
+                        newSlots.push({
+                            id: Math.random().toString(36).substr(2, 9),
+                            x: currentX,
+                            y: currentY,
+                            w: itemWidth,
+                            h: normalizedHeight,
+                            ratio: item.ratio
+                        });
+                        currentX += itemWidth;
+                    }
+                    currentY += normalizedHeight;
+                }
+
+                setSlots(newSlots);
+            }, [density, mediaPool]);
+
+            useEffect(() => {
+                generateLayout();
+                const handleResize = () => generateLayout();
+                window.addEventListener('resize', handleResize);
+                return () => window.removeEventListener('resize', handleResize);
+            }, [generateLayout]);
+
+            const loadMedia = async (currentSources = sources) => {
+                const active = currentSources.filter(s => s.enabled).map(s => s.path);
+                if (active.length === 0) return;
+                
+                setIsLoading(true);
+                let all = [];
+                try {
+                    for (const folder of active) {
+                        setScanningPath(folder);
+                        const res = await fetch('/api/slideshow/all_files', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ folders: [folder], recursive, include_videos: includeVideos, max_video_duration: maxDuration })
+                        });
+                        const data = await res.json();
+                        if (data.status === 'success') all = [...all, ...data.files];
+                    }
+                    setMediaPool(all);
+                } catch (e) { console.error(e); }
+                finally { setIsLoading(false); setScanningPath(""); }
+            };
+
+            useEffect(() => { 
+                const init = async () => {
+                    try {
+                        const res = await fetch('/api/slideshow/sources');
+                        const data = await res.json();
+                        if (data.sources) {
+                            setSources(data.sources);
+                            if (data.sources.some(s => s.enabled)) loadMedia(data.sources);
+                        }
+                    } catch (e) {
+                        const local = JSON.parse(localStorage.getItem("slideshow_sources") || "[]");
+                        setSources(local);
+                        if (local.some(s => s.enabled)) loadMedia(local);
+                    }
+                };
+                init();
+            }, []);
+
+            const syncSources = async (next) => {
+                setSources(next);
+                localStorage.setItem("slideshow_sources", JSON.stringify(next));
+                try {
+                    await fetch('/api/slideshow/sources', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ sources: next })
+                    });
+                } catch (e) { console.error(e); }
+            };
+
+            useEffect(() => { if (mediaPool.length > 0) generateLayout(); }, [mediaPool, generateLayout]);
+
+            useEffect(() => {
+                const handleInteraction = () => {
+                    setShowControls(true);
+                    clearTimeout(controlsTimerRef.current);
+                    controlsTimerRef.current = setTimeout(() => setShowControls(false), 3000);
+                };
+                window.addEventListener('mousemove', handleInteraction);
+                window.addEventListener('keydown', handleInteraction);
+                handleInteraction(); // Show initially
+                return () => {
+                    window.removeEventListener('mousemove', handleInteraction);
+                    window.removeEventListener('keydown', handleInteraction);
+                    clearTimeout(controlsTimerRef.current);
+                };
+            }, []);
+
+            const toggleFullscreen = () => {
+                if (!document.fullscreenElement) {
+                    document.documentElement.requestFullscreen().catch(err => console.error(err));
+                } else {
+                    document.exitFullscreen();
+                }
+            };
+
+            return (
+                <div className="grid-container" ref={containerRef}>
+                    {slots.map(slot => (
+                        <GridSlot 
+                            key={slot.id} 
+                            slot={slot} 
+                            mediaPool={mediaPool}
+                            landscapePool={landscapePool} 
+                            portraitPool={portraitPool}
+                            isPlaying={isPlaying} 
+                            rotationSpeed={rotationSpeed}
+                            imageFit={imageFit}
+                            onRebuild={generateLayout}
+                        />
+                    ))}
+
+                    {/* Overlay Controls */}
+                    <div className={`fixed bottom-8 left-1/2 -translate-x-1/2 z-50 transition-all duration-700 ${showControls ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-12 scale-95 pointer-events-none'} glass rounded-[2rem] px-8 py-4 flex items-center gap-8 shadow-2xl border border-white/10`}>
+                        <div className="flex flex-col gap-1 pr-6 border-r border-white/10 relative">
+                            <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">Sources</span>
+                            <div className="flex items-center gap-3">
+                                <button onClick={() => setIsSourceMenuOpen(!isSourceMenuOpen)} className="flex items-center gap-2 px-4 py-2 rounded-2xl bg-white/5 border border-white/5 text-white hover:bg-white/10 transition-all">
+                                    <LucideIcon name="library" className="w-4 h-4" />
+                                    <span className="text-[10px] font-black uppercase">{sources.filter(s => s.enabled).length} Active</span>
+                                </button>
+                                <button 
+                                    onClick={(e) => { e.stopPropagation(); loadMedia(); }} 
+                                    className={`${isLoading ? 'animate-spin' : 'text-amber-500'} p-2 hover:bg-white/5 rounded-xl transition-all`}
+                                >
+                                    <LucideIcon name="refresh-cw" className="w-4 h-4" />
+                                </button>
+                            </div>
+                            <SourceManager 
+                                sources={sources} isOpen={isSourceMenuOpen} onClose={() => setIsSourceMenuOpen(false)} 
+                                onToggle={(i) => {
+                                    const next = [...sources]; next[i].enabled = !next[i].enabled; 
+                                    syncSources(next);
+                                }}
+                                onRemove={(i) => {
+                                    const next = sources.filter((_, idx) => idx !== i); 
+                                    syncSources(next);
+                                }}
+                                onAdd={(p) => {
+                                    if (sources.some(s => s.path === p)) return;
+                                    const next = [...sources, { path: p, enabled: true }]; 
+                                    syncSources(next);
+                                }}
+                            />
+                        </div>
+
+                        <button onClick={() => setIsPlaying(!isPlaying)} className={`w-12 h-12 rounded-2xl flex items-center justify-center transition-all ${isPlaying ? 'bg-amber-500 text-black' : 'bg-white/5 text-white'}`}>
+                            <LucideIcon name={isPlaying ? "pause" : "play"} className="w-6 h-6 fill-current" />
+                        </button>
+
+                        <div className="flex items-center gap-6">
+                            <div className="flex flex-col gap-1 w-20">
+                                <div className="flex justify-between text-[9px] font-bold text-slate-500 uppercase"><span>Density</span><span className="text-amber-500">{density}</span></div>
+                                <input type="range" min="1" max="6" step="1" value={density} onChange={(e) => setDensity(Number(e.target.value))} className="accent-amber-500 h-1 bg-white/10 rounded-lg appearance-none cursor-pointer" />
+                            </div>
+                            <div className="flex flex-col gap-1 w-20">
+                                <div className="flex justify-between text-[9px] font-bold text-slate-500 uppercase"><span>Speed</span><span className="text-amber-500">{rotationSpeed}s</span></div>
+                                <input type="range" min="3" max="60" step="1" value={rotationSpeed} onChange={(e) => setRotationSpeed(Number(e.target.value))} className="accent-amber-500 h-1 bg-white/10 rounded-lg appearance-none cursor-pointer" />
+                            </div>
+                            <div className="flex flex-col gap-1 w-20">
+                                <div className="flex justify-between text-[9px] font-bold text-slate-500 uppercase"><span>Max Vid</span><span className="text-amber-500">{maxDuration}s</span></div>
+                                <input type="range" min="5" max="300" step="5" value={maxDuration} onChange={(e) => setMaxDuration(Number(e.target.value))} className="accent-amber-500 h-1 bg-white/10 rounded-lg appearance-none cursor-pointer" />
+                            </div>
+                        </div>
+
+                        <div className="flex items-center gap-4 border-l border-white/10 pl-6">
+                             <button onClick={() => { setIncludeVideos(!includeVideos); loadMedia(); }} className={`p-2 rounded-xl transition-all ${includeVideos ? 'text-amber-500 bg-amber-500/10' : 'text-slate-500'}`} title="Toggle Videos">
+                                <LucideIcon name="video" className="w-4 h-4" />
+                            </button>
+                            <button onClick={() => setImageFit(prev => prev === 'cover' ? 'contain' : 'cover')} className={`p-2 rounded-xl transition-all ${imageFit === 'contain' ? 'text-amber-500 bg-amber-500/10' : 'text-slate-500'}`} title="Toggle Image Fit (Zoom vs Native)">
+                                <LucideIcon name={imageFit === 'cover' ? "maximize" : "minimize"} className="w-4 h-4" />
+                            </button>
+                            <button onClick={toggleFullscreen} className="p-2 text-slate-400 hover:text-white">
+                                <LucideIcon name={document.fullscreenElement ? "minimize-2" : "expand"} className="w-4 h-4" />
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Loading Overlay */}
+                    {isLoading && (
+                        <div className="fixed inset-0 z-[200] glass flex flex-col items-center justify-center gap-6">
+                            <div className="w-24 h-24 rounded-[2.5rem] bg-gradient-to-br from-amber-400 to-orange-600 flex items-center justify-center animate-spin shadow-2xl">
+                                <LucideIcon name="refresh-cw" className="w-12 h-12 text-white" />
+                            </div>
+                            <div className="text-center">
+                                <h1 className="text-2xl font-black text-white mb-2 uppercase tracking-tighter">Initializing Wall...</h1>
+                                <p className="text-slate-500 text-sm font-mono truncate max-w-xl px-12">{scanningPath}</p>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>

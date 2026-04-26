@@ -8,10 +8,12 @@ import threading
 import urllib.parse
 import shutil
 import mimetypes
+import socket
 from pathlib import Path
 from datetime import datetime
+from PIL import Image as PILImage
 
-PORT = 8000
+PORT = 8888
 # Global state for current serving directory
 CURRENT_ROOT = Path.cwd()
 SCRIPT_DIR = Path(__file__).parent.resolve()  # Fixed: always points to the app's own directory
@@ -24,6 +26,35 @@ DOWNLOAD_IS_RUNNING = False
 DOWNLOAD_LOG = []
 DOWNLOAD_HISTORY_FILE = SCRIPT_DIR / "download_history.json"
 MEDIA_METADATA_CACHE_FILE = SCRIPT_DIR / "logs" / "media_metadata_cache.json"
+SLIDESHOW_SOURCES_FILE = SCRIPT_DIR / "logs" / "slideshow_sources.json"
+
+def get_all_lan_ips():
+    """Get all local network IP addresses of this machine."""
+    ips = []
+    try:
+        import socket
+        # Get all interfaces
+        hostname = socket.gethostname()
+        addr_infos = socket.getaddrinfo(hostname, None)
+        for info in addr_infos:
+            ip = info[4][0]
+            # Filter for IPv4 and non-loopback
+            if "." in ip and not ip.startswith("127."):
+                if ip not in ips:
+                    ips.append(ip)
+        
+        # Secondary method to ensure we catch the primary interface
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(('10.254.254.254', 1))
+            primary = s.getsockname()[0]
+            if primary not in ips:
+                ips.insert(0, primary)
+        finally:
+            s.close()
+    except Exception:
+        pass
+    return ips if ips else ['127.0.0.1']
 
 def get_video_info(file_path):
     """Get width, height, and duration of a video using ffprobe, accounting for rotation."""
@@ -73,7 +104,18 @@ def get_video_info(file_path):
         print(f"[FFPROBE ERR] {file_path}: {e}")
     return None
 
+def get_image_info(file_path):
+    """Get width, height, and ratio of an image using PIL."""
+    try:
+        with PILImage.open(file_path) as img:
+            w, h = img.size
+            return {"width": w, "height": h, "ratio": w/h if h > 0 else 1.0}
+    except Exception as e:
+        print(f"[PIL ERR] {file_path}: {e}")
+    return None
+
 class ThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    address_family = socket.AF_INET  # Force IPv4 to avoid network resolution issues
     def handle_error(self, request, client_address):
         # Silence harmless connection abortions/resets (WinError 10053/10054)
         exctype, value = sys.exc_info()[:2]
@@ -110,7 +152,7 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        print(f" [GET] {self.path}")
+        print(f" [INCOMING] Request from {self.client_address[0]} for {self.path}")
         if self.path == '/api/status':
             self.send_json(200, {
                 "status": "connected",
@@ -266,6 +308,15 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                     self.send_json(200, {"history": history})
             else:
                 self.send_json(200, {"history": []})
+        elif self.path == '/api/slideshow/sources':
+            if SLIDESHOW_SOURCES_FILE.exists():
+                with open(SLIDESHOW_SOURCES_FILE, "r", encoding="utf-8") as f:
+                    try:
+                        self.send_json(200, json.load(f))
+                    except:
+                        self.send_json(200, {"sources": []})
+            else:
+                self.send_json(200, {"sources": []})
         else:
             return super().do_GET()
 
@@ -754,6 +805,18 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                 print(f"[API] Commit Error: {e}")
                 self.send_json(500, {"error": str(e)})
 
+        elif self.path == '/api/slideshow/sources':
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                data = json.loads(post_data)
+                # Ensure logs directory exists
+                SLIDESHOW_SOURCES_FILE.parent.mkdir(parents=True, exist_ok=True)
+                with open(SLIDESHOW_SOURCES_FILE, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=4)
+                self.send_json(200, {"status": "success"})
+            except Exception as e:
+                self.send_json(500, {"error": str(e)})
         elif self.path == '/api/downloads/run':
             content_length = int(self.headers.get('Content-Length', 0))
             post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
@@ -890,26 +953,28 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                     folders = [single_folder]
                 recursive = params.get('recursive', True)
                 include_videos = params.get('include_videos', False)
+                max_video_duration = params.get('max_video_duration', 30) # New param for V2
+                
                 if not folders:
                     self.send_json(400, {"error": "At least one folder path is required"})
                     return
+
                 cache = {}
                 if MEDIA_METADATA_CACHE_FILE.exists():
                     try:
                         with open(MEDIA_METADATA_CACHE_FILE, "r", encoding="utf-8") as f:
                             cache = json.load(f)
                     except: pass
+
                 image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.webp'}
                 video_extensions = {'.mp4', '.mov', '.webm', '.mkv', '.m4v', '.avi'} if include_videos else set()
-                all_found_files = []
+                all_found_media = []
                 cache_updated = False
-                video_stats = {"found": 0, "portrait": 0, "short": 0, "accepted": 0}
                 
                 for folder_str in folders:
                     if not folder_str: continue
                     base_path = Path(folder_str).resolve()
                     if not base_path.exists():
-                        print(f"[API] Slideshow: Folder NOT FOUND: {folder_str}")
                         continue
 
                     pattern = "**/*" if recursive else "*"
@@ -921,28 +986,42 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                         p_str = str(p).replace('\\', '/')
                         
                         if ext in image_extensions:
-                            all_found_files.append(p_str)
-                        elif ext in video_extensions:
-                            video_stats["found"] += 1
-                            # Check cache first
+                            # Check cache for image ratio
                             info = cache.get(p_str)
-                            if not info:
+                            if not info or 'ratio' not in info:
+                                info = get_image_info(p)
+                                if info:
+                                    cache[p_str] = info
+                                    cache_updated = True
+                            
+                            if info:
+                                all_found_media.append({
+                                    "path": p_str,
+                                    "type": "image",
+                                    "ratio": info.get('ratio', 1.0),
+                                    "width": info.get('width', 0),
+                                    "height": info.get('height', 0)
+                                })
+                        elif ext in video_extensions:
+                            # Check cache for video info
+                            info = cache.get(p_str)
+                            if not info or 'duration' not in info:
                                 info = get_video_info(p)
                                 if info:
                                     cache[p_str] = info
                                     cache_updated = True
                             
                             if info:
-                                # Vertical/Portrait: Height > Width
-                                is_portrait = info.get('height', 0) > info.get('width', 0)
-                                is_short = info.get('duration', 0) <= 30
-                                
-                                if is_portrait: video_stats["portrait"] += 1
-                                if is_short: video_stats["short"] += 1
-                                
-                                if is_portrait and is_short:
-                                    all_found_files.append(p_str)
-                                    video_stats["accepted"] += 1
+                                duration = info.get('duration', 0)
+                                if duration <= max_video_duration:
+                                    all_found_media.append({
+                                        "path": p_str,
+                                        "type": "video",
+                                        "ratio": (info.get('width', 1) / info.get('height', 1)) if info.get('height', 0) > 0 else 1.0,
+                                        "duration": duration,
+                                        "width": info.get('width', 0),
+                                        "height": info.get('height', 0)
+                                    })
 
                 # Save cache if needed
                 if cache_updated:
@@ -952,14 +1031,22 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                             json.dump(cache, f, indent=2)
                     except: pass
 
-                # Deduplicate
-                files = list(dict.fromkeys(all_found_files))
+                # Deduplicate based on path
+                unique_media = []
+                seen_paths = set()
+                for m in all_found_media:
+                    if m["path"] not in seen_paths:
+                        unique_media.append(m)
+                        seen_paths.add(m["path"])
                 
-                print(f"[API] Slideshow: Found {len(files)} items across {len(folders)} sources (videos={include_videos})")
-                if include_videos:
-                    print(f"      [VIDEO STATS] Found: {video_stats['found']}, Portrait: {video_stats['portrait']}, Short: {video_stats['short']} -> Accepted: {video_stats['accepted']}")
-                
-                self.send_json(200, {"status": "success", "files": files})
+                print(f"[API] Slideshow: Found {len(unique_media)} items across {len(folders)} sources")
+                self.send_json(200, {"status": "success", "files": unique_media})
+
+            except Exception as e:
+                import traceback
+                print(f"[API ERR] Slideshow: {e}")
+                print(traceback.format_exc())
+                self.send_json(500, {"error": str(e)})
 
             except Exception as e:
                 import traceback
@@ -1052,12 +1139,21 @@ def run_server(initial_dir):
     handler = WorkspaceHandler
     
     ThreadingTCPServer.allow_reuse_address = True
-    with ThreadingTCPServer(("", PORT), handler) as httpd:
-        print(f"\n[Media Visualizer Helper - Multi-Threaded]")
+    # Explicitly bind to 0.0.0.0 to ensure network access on all interfaces
+    with ThreadingTCPServer(("0.0.0.0", PORT), handler) as httpd:
+        ips = get_all_lan_ips()
+        print(f"\n[Media Visualizer Helper - NETWORK ENABLED]")
         print(f"------------------------------------------")
         print(f"Serving from: {CURRENT_ROOT}")
-        print(f"Local Server URL: http://localhost:{PORT}")
-        print(f"Keep this window open while using the visualizer dashboard.\n")
+        print(f"Local Access:   http://localhost:{PORT}")
+        for ip in ips:
+            print(f"Network Access: http://{ip}:{PORT}")
+        
+        print(f"\n[Troubleshooting]")
+        print(f"1. Ensure this PC's network is set to 'Private', not 'Public'.")
+        print(f"2. Use the IP that matches your other computer's subnet (e.g. 192.168.x.x).")
+        print(f"3. Check that your Firewall allows port {PORT}.")
+        print(f"------------------------------------------\n")
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
