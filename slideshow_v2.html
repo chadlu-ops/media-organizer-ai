@@ -62,8 +62,20 @@
             50% { opacity: 0.4; }
         }
         .slot-loading {
-            background: #1e293b;
-            animation: pulse-slow 2s infinite;
+            background: #1a1b26; /* Tokyo Night Theme */
+            position: relative;
+            overflow: hidden;
+        }
+        .slot-loading::after {
+            content: "";
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.05), transparent);
+            animation: shimmer 1.5s infinite;
+        }
+        @keyframes shimmer {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(100%); }
         }
 
         .no-scrollbar::-webkit-scrollbar { display: none; }
@@ -156,7 +168,7 @@
             );
         };
 
-        const GridSlot = ({ slot, mediaPool, landscapePool, portraitPool, isPlaying, rotationSpeed, imageFit, onRebuild }) => {
+        const GridSlot = ({ slot, mediaPool, isScanning, landscapePool, portraitPool, isPlaying, rotationSpeed, imageFit, onRebuild }) => {
             const [item, setItem] = useState(null);
             const [failCount, setFailCount] = useState(0);
             const rotateTimerRef = useRef(null);
@@ -164,14 +176,19 @@
             // Unique pace for this slot (0.7x to 1.4x of global speed)
             // This ensures slots naturally drift apart and never form "waves"
             const paceMultiplier = useMemo(() => 0.7 + Math.random() * 0.7, []);
+            const hasStartedRotation = useRef(false);
+
+            const lpRef = useRef(landscapePool);
+            const ppRef = useRef(portraitPool);
+            useEffect(() => { lpRef.current = landscapePool; ppRef.current = portraitPool; }, [landscapePool, portraitPool]);
 
             const rotate = useCallback(() => {
                 if (!isPlaying) return;
                 
                 const targetIsPortrait = slot.ratio < 1;
-                const pool = targetIsPortrait ? portraitPool : landscapePool;
+                const pool = targetIsPortrait ? ppRef.current : lpRef.current;
                 
-                if (pool.length > 0) {
+                if (pool && pool.length > 0) {
                     const newItem = pool[Math.floor(Math.random() * pool.length)];
                     setItem(newItem);
                     setFailCount(0);
@@ -187,19 +204,33 @@
                     // If no match, try rotating again sooner
                     rotateTimerRef.current = setTimeout(rotate, 2000);
                 }
-            }, [landscapePool, portraitPool, isPlaying, slot.ratio, onRebuild]);
+            }, [isPlaying, slot.ratio, onRebuild]);
 
             useEffect(() => {
-                if (mediaPool.length === 0) return;
-                // Initial stagger using the slot's unique pace multiplier
+                // Initial fill: Pick first item as soon as pool is available
+                if (!item && (landscapePool.length > 0 || portraitPool.length > 0)) {
+                    rotate();
+                }
+            }, [landscapePool.length, portraitPool.length, item, rotate]);
+
+            const isReady = !isScanning || mediaPool.length >= 1000;
+
+            useEffect(() => {
+                if (mediaPool.length === 0 || hasStartedRotation.current) return;
+                
+                // Start rotation cycle if scanning is complete OR we have enough variety (1000 items)
+                if (!isReady) return;
+
+                hasStartedRotation.current = true;
+
                 const delay = Math.random() * rotationSpeed * 1000 * paceMultiplier;
                 rotateTimerRef.current = setTimeout(rotate, delay);
                 return () => clearTimeout(rotateTimerRef.current);
-            }, []); 
+            }, [isReady, mediaPool.length]); 
 
-            const handleComplete = () => {
+            const handleComplete = useCallback(() => {
                 rotate();
-            };
+            }, [rotate]);
 
             const overlap = imageFit === 'contain' ? 1.1 : 1.0;
             const w = slot.w * overlap;
@@ -226,6 +257,29 @@
                 </div>
             );
         };
+
+
+
+        const ControlStepper = ({ label, value, onIncrease, onDecrease, suffix = "" }) => (
+            <div className="flex flex-col gap-1 px-6 border-r border-white/10">
+                <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">{label}</span>
+                <div className="flex items-center gap-3">
+                    <button 
+                        onClick={onDecrease}
+                        className="w-6 h-6 rounded-full bg-white/5 hover:bg-white/10 flex items-center justify-center transition-colors border border-white/10"
+                    >
+                        <LucideIcon name="minus" className="w-3 h-3" />
+                    </button>
+                    <span className="text-sm font-bold w-12 text-center text-amber-500/90">{value}{suffix}</span>
+                    <button 
+                        onClick={onIncrease}
+                        className="w-6 h-6 rounded-full bg-white/5 hover:bg-white/10 flex items-center justify-center transition-colors border border-white/10"
+                    >
+                        <LucideIcon name="plus" className="w-3 h-3" />
+                    </button>
+                </div>
+            </div>
+        );
 
         const SourceManager = ({ sources, onToggle, onRemove, onAdd, isOpen, onClose }) => {
             const [newPath, setNewPath] = useState("");
@@ -276,10 +330,14 @@
             const [includeVideos, setIncludeVideos] = useState(true);
             const [recursive, setRecursive] = useState(true);
             const [isLoading, setIsLoading] = useState(false);
+            const [isScanning, setIsScanning] = useState(false);
             const [scanningPath, setScanningPath] = useState("");
             const [isSourceMenuOpen, setIsSourceMenuOpen] = useState(false);
             const [showControls, setShowControls] = useState(true);
             const [slots, setSlots] = useState([]);
+            const mediaPoolRef = useRef([]);
+            useEffect(() => { mediaPoolRef.current = mediaPool; }, [mediaPool]);
+            
             const controlsTimerRef = useRef(null);
 
             const containerRef = useRef(null);
@@ -289,14 +347,15 @@
 
             // Layout Engine - Justified Partition with Height Normalization
             const generateLayout = useCallback(() => {
-                if (!containerRef.current || mediaPool.length === 0) return;
+                const pool = mediaPoolRef.current;
+                if (!containerRef.current || pool.length === 0) return;
                 
                 const width = containerRef.current.offsetWidth;
                 const height = containerRef.current.offsetHeight;
                 const rows = [];
                 
                 const targetRowHeight = height / Math.max(1, density);
-                const startIdx = Math.floor(Math.random() * mediaPool.length);
+                const startIdx = Math.floor(Math.random() * pool.length);
                 const sampleSize = 100; // Larger sample to ensure we fill the screen
                 
                 let currentRow = [];
@@ -304,7 +363,8 @@
                 let accumulatedHeight = 0;
 
                 for (let i = 0; i < sampleSize; i++) {
-                    const item = mediaPool[(startIdx + i) % mediaPool.length];
+                    const item = pool[(startIdx + i) % pool.length];
+                    if (!item) continue;
                     currentRow.push(item);
                     currentRowWidth += item.ratio * targetRowHeight;
 
@@ -360,7 +420,7 @@
                 }
 
                 setSlots(newSlots);
-            }, [density, mediaPool]);
+            }, [density]);
 
             useEffect(() => {
                 generateLayout();
@@ -374,21 +434,48 @@
                 if (active.length === 0) return;
                 
                 setIsLoading(true);
-                let all = [];
                 try {
-                    for (const folder of active) {
-                        setScanningPath(folder);
-                        const res = await fetch('/api/slideshow/all_files', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ folders: [folder], recursive, include_videos: includeVideos, max_video_duration: maxDuration })
-                        });
-                        const data = await res.json();
-                        if (data.status === 'success') all = [...all, ...data.files];
-                    }
-                    setMediaPool(all);
-                } catch (e) { console.error(e); }
-                finally { setIsLoading(false); setScanningPath(""); }
+                    // Step 1: Trigger background scan
+                    await fetch('/api/images/scan', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ folders: active, recursive, include_videos: includeVideos, max_video_duration: maxDuration })
+                    });
+
+                    // Wait a moment for scanner to find initial batch
+                    await new Promise(r => setTimeout(r, 500));
+
+                    // Step 2: Fetch Seed (Fast first 100)
+                    const seedRes = await fetch('/api/images/seed');
+                    const seedData = await seedRes.json();
+                    setMediaPool(seedData.items);
+                    setIsScanning(seedData.status.running);
+
+                    // Step 3: Progressive Load Background
+                    let currentOffset = seedData.items.length;
+                    
+                    const fetchNextChunk = async () => {
+                        try {
+                            const res = await fetch(`/api/images/index?offset=${currentOffset}&limit=500`);
+                            const data = await res.json();
+                            if (data.items && data.items.length > 0) {
+                                setMediaPool(prev => [...prev, ...data.items]);
+                                currentOffset += data.items.length;
+                                if (currentOffset < data.total || data.status.running) {
+                                    setIsScanning(data.status.running);
+                                    setTimeout(fetchNextChunk, 1000); // Background throttle
+                                } else {
+                                    setIsScanning(false);
+                                }
+                            } else if (data.status.running) {
+                                setTimeout(fetchNextChunk, 1000);
+                            }
+                        } catch (err) { console.error("Index fetch error", err); }
+                    };
+                    
+                    fetchNextChunk();
+                } catch (e) { console.error("Load error", e); }
+                finally { setIsLoading(false); }
             };
 
             useEffect(() => { 
@@ -421,7 +508,12 @@
                 } catch (e) { console.error(e); }
             };
 
-            useEffect(() => { if (mediaPool.length > 0) generateLayout(); }, [mediaPool, generateLayout]);
+            useEffect(() => { 
+                // Only generate initial layout when mediaPool FIRST gets items
+                if (mediaPool.length > 0 && slots.length === 0) {
+                    generateLayout();
+                }
+            }, [mediaPool, generateLayout, slots.length]);
 
             useEffect(() => {
                 const handleInteraction = () => {
@@ -454,6 +546,7 @@
                             key={slot.id} 
                             slot={slot} 
                             mediaPool={mediaPool}
+                            isScanning={isScanning}
                             landscapePool={landscapePool} 
                             portraitPool={portraitPool}
                             isPlaying={isPlaying} 
@@ -465,6 +558,12 @@
 
                     {/* Overlay Controls */}
                     <div className={`fixed bottom-8 left-1/2 -translate-x-1/2 z-50 transition-all duration-700 ${showControls ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-12 scale-95 pointer-events-none'} glass rounded-[2rem] px-8 py-4 flex items-center gap-8 shadow-2xl border border-white/10`}>
+                        {isScanning && (
+                            <div className="absolute -top-12 left-1/2 -translate-x-1/2 bg-amber-500 text-black text-[9px] font-black px-3 py-1 rounded-full flex items-center gap-2 shadow-xl animate-bounce">
+                                <LucideIcon name="database" className="w-3 h-3" />
+                                INDEXING: {mediaPool.length} ITEMS
+                            </div>
+                        )}
                         <div className="flex flex-col gap-1 pr-6 border-r border-white/10 relative">
                             <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">Sources</span>
                             <div className="flex items-center gap-3">
@@ -502,18 +601,28 @@
                         </button>
 
                         <div className="flex items-center gap-6">
-                            <div className="flex flex-col gap-1 w-20">
-                                <div className="flex justify-between text-[9px] font-bold text-slate-500 uppercase"><span>Density</span><span className="text-amber-500">{density}</span></div>
-                                <input type="range" min="1" max="6" step="1" value={density} onChange={(e) => setDensity(Number(e.target.value))} className="accent-amber-500 h-1 bg-white/10 rounded-lg appearance-none cursor-pointer" />
-                            </div>
-                            <div className="flex flex-col gap-1 w-20">
-                                <div className="flex justify-between text-[9px] font-bold text-slate-500 uppercase"><span>Speed</span><span className="text-amber-500">{rotationSpeed}s</span></div>
-                                <input type="range" min="3" max="60" step="1" value={rotationSpeed} onChange={(e) => setRotationSpeed(Number(e.target.value))} className="accent-amber-500 h-1 bg-white/10 rounded-lg appearance-none cursor-pointer" />
-                            </div>
-                            <div className="flex flex-col gap-1 w-20">
-                                <div className="flex justify-between text-[9px] font-bold text-slate-500 uppercase"><span>Max Vid</span><span className="text-amber-500">{maxDuration}s</span></div>
-                                <input type="range" min="5" max="300" step="5" value={maxDuration} onChange={(e) => setMaxDuration(Number(e.target.value))} className="accent-amber-500 h-1 bg-white/10 rounded-lg appearance-none cursor-pointer" />
-                            </div>
+                            <ControlStepper 
+                                label="Density"
+                                value={density}
+                                onIncrease={() => setDensity(d => Math.min(10, d + 1))}
+                                onDecrease={() => setDensity(d => Math.max(1, d - 1))}
+                            />
+
+                            <ControlStepper 
+                                label="Speed"
+                                value={rotationSpeed}
+                                suffix="s"
+                                onIncrease={() => setRotationSpeed(s => Math.min(300, s + 1))}
+                                onDecrease={() => setRotationSpeed(s => Math.max(1, s - 1))}
+                            />
+
+                            <ControlStepper 
+                                label="Max Video"
+                                value={maxDuration}
+                                suffix="s"
+                                onIncrease={() => setMaxDuration(d => Math.min(600, d + 10))}
+                                onDecrease={() => setMaxDuration(d => Math.max(5, d - 10))}
+                            />
                         </div>
 
                         <div className="flex items-center gap-4 border-l border-white/10 pl-6">

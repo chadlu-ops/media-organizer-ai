@@ -27,6 +27,20 @@ DOWNLOAD_LOG = []
 DOWNLOAD_HISTORY_FILE = SCRIPT_DIR / "download_history.json"
 MEDIA_METADATA_CACHE_FILE = SCRIPT_DIR / "logs" / "media_metadata_cache.json"
 SLIDESHOW_SOURCES_FILE = SCRIPT_DIR / "logs" / "slideshow_sources.json"
+SLIDESHOW_REGISTRY_FILE = SCRIPT_DIR / "logs" / "slideshow_registry.json"
+
+# Phase 1: Registry for high-performance initialization
+SCAN_REGISTRY = []
+SCAN_STATUS = {"total": 0, "scanned": 0, "running": False}
+SCAN_LOCK = threading.Lock()
+
+# Load registry from disk on startup
+if SLIDESHOW_REGISTRY_FILE.exists():
+    try:
+        with open(SLIDESHOW_REGISTRY_FILE, "r", encoding="utf-8") as f:
+            SCAN_REGISTRY = json.load(f)
+            print(f"[Slideshow] Loaded {len(SCAN_REGISTRY)} items from persistent registry.")
+    except: pass
 
 def get_all_lan_ips():
     """Get all local network IP addresses of this machine."""
@@ -109,10 +123,11 @@ def get_image_info(file_path):
     try:
         with PILImage.open(file_path) as img:
             w, h = img.size
-            return {"width": w, "height": h, "ratio": w/h if h > 0 else 1.0}
+            return {'width': w, 'height': h, 'ratio': w/h if h > 0 else 1.0}
     except Exception as e:
         print(f"[PIL ERR] {file_path}: {e}")
-    return None
+        # Fallback for corrupted images so they don't block the grid
+        return {'width': 1000, 'height': 1000, 'ratio': 1.0}
 
 class ThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     address_family = socket.AF_INET  # Force IPv4 to avoid network resolution issues
@@ -308,6 +323,18 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                     self.send_json(200, {"history": history})
             else:
                 self.send_json(200, {"history": []})
+        elif self.path == '/api/images/seed':
+            with SCAN_LOCK:
+                seed = SCAN_REGISTRY[:500]
+                self.send_json(200, {"items": seed, "total": len(SCAN_REGISTRY), "status": SCAN_STATUS})
+        elif self.path.startswith('/api/images/index'):
+            query = urllib.parse.urlparse(self.path).query
+            params = urllib.parse.parse_qs(query)
+            offset = int(params.get('offset', [0])[0])
+            limit = int(params.get('limit', [500])[0])
+            with SCAN_LOCK:
+                items = SCAN_REGISTRY[offset : offset + limit]
+                self.send_json(200, {"items": items, "total": len(SCAN_REGISTRY), "status": SCAN_STATUS})
         elif self.path == '/api/slideshow/sources':
             if SLIDESHOW_SOURCES_FILE.exists():
                 with open(SLIDESHOW_SOURCES_FILE, "r", encoding="utf-8") as f:
@@ -689,6 +716,119 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
             except Exception as e:
                 print(f"[API] Diagnose Error: {e}")
                 self.send_json(500, {"error": str(e)})
+        elif self.path == '/api/images/scan':
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                params = json.loads(post_data)
+                folders = params.get('folders', [])
+                recursive = params.get('recursive', True)
+                include_videos = params.get('include_videos', False)
+                max_video_duration = params.get('max_video_duration', 30)
+
+                def run_background_scan():
+                    global SCAN_REGISTRY, SCAN_STATUS
+                    import time
+                    with SCAN_LOCK:
+                        if SCAN_STATUS["running"]: return
+                        SCAN_STATUS["running"] = True
+                        # Don't wipe SCAN_REGISTRY here; we'll merge new files into it
+                        SCAN_STATUS["scanned"] = 0
+
+                    image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.webp'}
+                    video_extensions = {'.mp4', '.mov', '.webm', '.mkv', '.m4v', '.avi'} if include_videos else set()
+                    
+                    cache = {}
+                    if MEDIA_METADATA_CACHE_FILE.exists():
+                        try:
+                            with open(MEDIA_METADATA_CACHE_FILE, "r", encoding="utf-8") as f:
+                                cache = json.load(f)
+                        except: pass
+
+                    from concurrent.futures import ThreadPoolExecutor
+                    
+                    found_files = []
+                    for folder_str in folders:
+                        base_path = Path(folder_str).resolve()
+                        if not base_path.exists(): continue
+                        pattern = "**/*" if recursive else "*"
+                        for p in base_path.glob(pattern):
+                            if p.is_file() and p.suffix.lower() in (image_extensions | video_extensions):
+                                found_files.append(p)
+
+                    # Quick filter: separate new files from cached ones
+                    registry_lookup = {item["path"]: item for item in SCAN_REGISTRY}
+                    new_found_paths = []
+                    for p in found_files:
+                        p_str = str(p).replace('\\', '/')
+                        if p_str not in registry_lookup:
+                            new_found_paths.append(p)
+                    
+                    # Update status for progress bar
+                    with SCAN_LOCK:
+                        SCAN_STATUS["total"] = len(new_found_paths)
+                        SCAN_STATUS["scanned"] = 0
+
+                    updated_cache = False
+
+                    def process_file(p):
+                        nonlocal updated_cache
+                        p_str = str(p).replace('\\', '/')
+                        ext = p.suffix.lower()
+                        is_video = ext in video_extensions
+                        
+                        info = cache.get(p_str)
+                        if not info or 'ratio' not in info:
+                            if is_video:
+                                info = get_video_info(p)
+                            else:
+                                info = get_image_info(p)
+                            if info:
+                                with SCAN_LOCK:
+                                    cache[p_str] = info
+                                    updated_cache = True
+                        
+                        if info:
+                            item = {
+                                "path": p_str,
+                                "type": "video" if is_video else "image",
+                                "ratio": info.get('ratio', 1.0),
+                                "width": info.get('width', 0),
+                                "height": info.get('height', 0),
+                                "orientation": "landscape" if info.get('width', 0) > info.get('height', 0) else "portrait"
+                            }
+                            with SCAN_LOCK:
+                                if p_str not in registry_lookup:
+                                    SCAN_REGISTRY.append(item)
+                                SCAN_STATUS["scanned"] += 1
+
+                    # Process only NEW files in parallel
+                    if new_found_paths:
+                        with ThreadPoolExecutor(max_workers=8) as executor:
+                            executor.map(process_file, new_found_paths)
+                    
+                    # Periodic save of the whole registry
+                    try:
+                        SLIDESHOW_REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
+                        with open(SLIDESHOW_REGISTRY_FILE, "w", encoding="utf-8") as f:
+                            json.dump(SCAN_REGISTRY, f)
+                    except: pass
+                    
+                    if updated_cache:
+                        try:
+                            MEDIA_METADATA_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+                            with open(MEDIA_METADATA_CACHE_FILE, "w", encoding="utf-8") as f:
+                                json.dump(cache, f)
+                        except: pass
+
+                    with SCAN_LOCK:
+                        SCAN_STATUS["running"] = False
+
+                threading.Thread(target=run_background_scan, daemon=True).start()
+                self.send_json(200, {"status": "scanning_started"})
+            except Exception as e:
+                self.send_json(500, {"error": str(e)})
+
         elif self.path == '/api/commit_log':
             content_length = int(self.headers.get('Content-Length', 0))
             post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
