@@ -19,9 +19,9 @@
             margin: 0;
         }
         .glass {
-            background: rgba(15, 23, 42, 0.7);
-            backdrop-filter: blur(20px);
-            border: 1px solid rgba(255, 255, 255, 0.1);
+            background: rgba(15, 23, 42, 0.92);
+            backdrop-filter: blur(25px);
+            border: 1px solid rgba(255, 255, 255, 0.15);
         }
         .grid-container {
             width: 100vw;
@@ -84,6 +84,17 @@
             background: rgba(255, 255, 255, 0.1); 
             border-radius: 10px;
         }
+
+        .mutation-highlight {
+            animation: mutate-pulse 1.5s cubic-bezier(0.4, 0, 0.2, 1);
+            z-index: 50;
+        }
+
+        @keyframes mutate-pulse {
+            0% { box-shadow: 0 0 0 0px rgba(245, 158, 11, 0), inset 0 0 0 0px rgba(245, 158, 11, 0); transform: scale(1); }
+            30% { box-shadow: 0 0 40px rgba(245, 158, 11, 0.4), inset 0 0 20px rgba(245, 158, 11, 0.2); transform: scale(1.02); }
+            100% { box-shadow: 0 0 0 0px rgba(245, 158, 11, 0), inset 0 0 0 0px rgba(245, 158, 11, 0); transform: scale(1); }
+        }
     </style>
 </head>
 <body>
@@ -103,14 +114,18 @@
             return <span ref={iconRef} className="inline-flex items-center justify-center"></span>;
         };
 
-        const MediaItem = ({ media, isPlaying, duration, imageFit, onComplete }) => {
+        const MediaItem = ({ media, isPlaying, isMuted, isAudioSource, duration, imageFit, onComplete }) => {
             const videoRef = useRef(null);
             const [loaded, setLoaded] = useState(false);
             const [progress, setProgress] = useState(0);
 
+            useEffect(() => {
+                if (videoRef.current) {
+                    videoRef.current.muted = isMuted || !isAudioSource;
+                }
+            }, [isMuted, isAudioSource]);
+
             const jitteredDuration = useMemo(() => {
-                // Use a stable jitter for this specific media instance to prevent "pumping" 
-                // but keep it relative to the global duration
                 return duration * (0.8 + Math.random() * 0.4);
             }, [duration, media.path]);
 
@@ -144,7 +159,7 @@
                             ref={videoRef}
                             src={mediaUrl}
                             autoPlay
-                            muted
+                            muted={isMuted || !isAudioSource}
                             playsInline
                             className={`media-content ${loaded ? 'opacity-100' : 'opacity-0'}`}
                             style={{ objectFit: imageFit }}
@@ -168,13 +183,15 @@
             );
         };
 
-        const GridSlot = ({ slot, mediaPool, isScanning, landscapePool, portraitPool, isPlaying, rotationSpeed, imageFit, onRebuild }) => {
+        const GridSlot = ({ slot, mediaPool, isScanning, layoutType, landscapePool, portraitPool, isPlaying, isMuted, isAudioSource, rotationSpeed, imageFit, onRebuild }) => {
             const [item, setItem] = useState(null);
+            const [spawnTime, setSpawnTime] = useState(0);
             const [failCount, setFailCount] = useState(0);
+            const [stagnation, setStagnation] = useState(0);
+            const [isMutating, setIsMutating] = useState(false);
             const rotateTimerRef = useRef(null);
             
             // Unique pace for this slot (0.7x to 1.4x of global speed)
-            // This ensures slots naturally drift apart and never form "waves"
             const paceMultiplier = useMemo(() => 0.7 + Math.random() * 0.7, []);
             const hasStartedRotation = useRef(false);
 
@@ -185,26 +202,75 @@
             const rotate = useCallback(() => {
                 if (!isPlaying) return;
                 
-                const targetIsPortrait = slot.ratio < 1;
+                // Diversity Check (Priority Fetching)
+                const currentRatio = landscapePool.length / (portraitPool.length + 0.001);
+                const needsPortrait = currentRatio > 1.5; // Bias towards balance
+                const needsLandscape = currentRatio < 0.6;
+                
+                let targetIsPortrait = slot.ratio < 1;
+                
+                // If this is a mutation-capable layout, we can try to "force" a type 
+                // but for now we follow the slot's physical shape
                 const pool = targetIsPortrait ? ppRef.current : lpRef.current;
                 
                 if (pool && pool.length > 0) {
-                    const newItem = pool[Math.floor(Math.random() * pool.length)];
+                    // Content-Aware Selection: 
+                    // Pick 10 random candidates and choose the one that BEST fits this slot's ratio.
+                    // This dramatically reduces letterboxing in "Native" mode.
+                    let bestItem = pool[0];
+                    let bestDiff = Infinity;
+                    const sampleSize = Math.min(15, pool.length);
+                    
+                    for (let i = 0; i < sampleSize; i++) {
+                        const candidate = pool[Math.floor(Math.random() * pool.length)];
+                        const diff = Math.abs(candidate.ratio - slot.ratio);
+                        if (diff < bestDiff) {
+                            bestDiff = diff;
+                            bestItem = candidate;
+                        }
+                    }
+
+                    const newItem = bestItem;
+                    
+                    // Mutation Logic (Phase 2)
+                    if (layoutType === 'mosaic' && newItem.orientation === (item?.orientation || '')) {
+                        setStagnation(prev => prev + 1);
+                    } else {
+                        setStagnation(0);
+                    }
+
                     setItem(newItem);
+                    setSpawnTime(Date.now());
                     setFailCount(0);
                 } else {
-                    setFailCount(prev => {
-                        const next = prev + 1;
-                        if (next >= 3) {
-                            console.warn(`Slot ${slot.id} failed to find orientation match 3 times. Rebuilding grid...`);
-                            onRebuild();
-                        }
-                        return next;
-                    });
-                    // If no match, try rotating again sooner
+                    setFailCount(prev => prev + 1);
                     rotateTimerRef.current = setTimeout(rotate, 2000);
                 }
-            }, [isPlaying, slot.ratio, onRebuild]);
+            }, [isPlaying, slot.ratio, item, layoutType]);
+
+            // If stagnation limit reached, trigger mutation pulse
+            useEffect(() => {
+                if (layoutType === 'mosaic' && stagnation >= 4) {
+                    setIsMutating(true);
+                    setTimeout(() => {
+                        setIsMutating(false);
+                        onRebuild(); // Trigger a partial or full rebuild to break stagnation
+                    }, 1000);
+                    setStagnation(0);
+                }
+            }, [stagnation, layoutType, onRebuild]);
+
+            // Share state with parent for audio selection
+            useEffect(() => {
+                if (item?.type === 'video') {
+                    window.dispatchEvent(new CustomEvent('video-active', { 
+                        detail: { id: slot.id, spawnTime, active: true } 
+                    }));
+                    return () => window.dispatchEvent(new CustomEvent('video-active', { 
+                        detail: { id: slot.id, active: false } 
+                    }));
+                }
+            }, [item, spawnTime, slot.id]);
 
             useEffect(() => {
                 // Initial fill: Pick first item as soon as pool is available
@@ -240,14 +306,22 @@
 
             return (
                 <div 
-                    className="absolute transition-all duration-800" 
-                    style={{ left: x, top: y, width: w, height: h, zIndex: item ? 10 : 0 }}
+                    className={`absolute transition-all duration-1000 ease-in-out ${isMutating ? 'mutation-highlight' : ''}`} 
+                    style={{ 
+                        left: x, 
+                        top: y, 
+                        width: w, 
+                        height: h, 
+                        zIndex: isMutating ? 50 : (item ? 10 : 0) 
+                    }}
                 >
-                    <div className={`w-full h-full overflow-hidden shadow-2xl transition-all duration-500 ${imageFit === 'contain' ? 'rounded-xl' : ''} ${!item ? 'slot-loading' : ''}`}>
+                    <div className={`w-full h-full overflow-hidden shadow-2xl transition-all duration-700 ${!item ? 'slot-loading' : ''}`}>
                         {item && (
                             <MediaItem 
                                 media={item} 
                                 isPlaying={isPlaying} 
+                                isMuted={isMuted}
+                                isAudioSource={isAudioSource}
                                 duration={rotationSpeed * 1000 * paceMultiplier}
                                 imageFit={imageFit}
                                 onComplete={handleComplete} 
@@ -259,6 +333,72 @@
         };
 
 
+
+        const DirectoryPicker = ({ onSelect, onClose }) => {
+            const [currentPath, setCurrentPath] = useState("");
+            const [folders, setFolders] = useState([]);
+            const [isLoading, setIsLoading] = useState(false);
+
+            const loadFolders = async (path = "") => {
+                setIsLoading(true);
+                try {
+                    const res = await fetch(`/api/fs/list?path=${encodeURIComponent(path)}`);
+                    const data = await res.json();
+                    if (data.folders) setFolders(data.folders);
+                    setCurrentPath(data.path || "");
+                } catch (e) { console.error(e); }
+                setIsLoading(false);
+            };
+
+            useEffect(() => { loadFolders(""); }, []);
+
+            return (
+                <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/80 backdrop-blur-md">
+                    <div className="bg-[#1a1b26] border border-white/10 rounded-3xl w-full max-w-lg flex flex-col max-h-[70vh] shadow-2xl overflow-hidden">
+                        <div className="p-6 border-b border-white/5 flex items-center justify-between bg-black/20">
+                            <div className="flex flex-col">
+                                <span className="text-[10px] font-black uppercase tracking-widest text-amber-500">Remote Browser</span>
+                                <span className="text-xs font-bold text-white truncate max-w-[300px]">{currentPath || "Computer"}</span>
+                            </div>
+                            <button onClick={onClose} className="p-2 hover:bg-white/5 rounded-xl transition-all"><LucideIcon name="x" /></button>
+                        </div>
+                        
+                        <div className="flex-1 overflow-y-auto p-4 custom-scrollbar space-y-1">
+                            {currentPath && (
+                                <button 
+                                    onClick={() => loadFolders(currentPath.split('/').slice(0, -1).join('/') || "")}
+                                    className="w-full flex items-center gap-3 p-3 hover:bg-white/5 rounded-2xl transition-all text-slate-400 group"
+                                >
+                                    <LucideIcon name="corner-left-up" className="w-4 h-4 group-hover:text-amber-500" />
+                                    <span className="text-xs font-bold">Go Back</span>
+                                </button>
+                            )}
+                            {folders.map(f => (
+                                <div key={f} className="flex items-center gap-1 group">
+                                    <button 
+                                        onClick={() => loadFolders(f)}
+                                        className="flex-1 flex items-center gap-3 p-3 hover:bg-white/5 rounded-2xl transition-all text-slate-300"
+                                    >
+                                        <LucideIcon name="folder" className="w-4 h-4 text-amber-500/50 group-hover:text-amber-500" />
+                                        <span className="text-xs font-bold truncate">{f.split('/').pop() || f}</span>
+                                    </button>
+                                    <button 
+                                        onClick={() => (onSelect(f), onClose())}
+                                        className="p-3 text-emerald-500 hover:bg-emerald-500/10 rounded-2xl transition-all opacity-0 group-hover:opacity-100"
+                                        title="Select this folder"
+                                    >
+                                        <LucideIcon name="check-circle-2" className="w-5 h-5" />
+                                    </button>
+                                </div>
+                            ))}
+                            {folders.length === 0 && !isLoading && (
+                                <div className="p-12 text-center text-slate-600 italic text-sm">No folders found</div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
 
         const ControlStepper = ({ label, value, onIncrease, onDecrease, suffix = "" }) => (
             <div className="flex flex-col gap-1 px-6 border-r border-white/10">
@@ -283,10 +423,12 @@
 
         const SourceManager = ({ sources, onToggle, onRemove, onAdd, isOpen, onClose }) => {
             const [newPath, setNewPath] = useState("");
+            const [isPickerOpen, setIsPickerOpen] = useState(false);
             if (!isOpen) return null;
 
             return (
                 <div className="absolute bottom-24 left-0 glass rounded-3xl p-6 w-96 shadow-2xl border border-white/10 z-[100] animate-in fade-in slide-in-from-bottom-4 duration-300">
+                    {isPickerOpen && <DirectoryPicker onSelect={onAdd} onClose={() => setIsPickerOpen(false)} />}
                     <div className="flex items-center justify-between mb-4">
                         <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Library Sources</span>
                         <button onClick={onClose} className="text-slate-500 hover:text-white transition-colors">
@@ -297,7 +439,7 @@
                         {sources.map((src, i) => (
                             <div key={i} className="flex items-center gap-3 bg-white/5 p-2 rounded-xl group hover:bg-white/10 transition-all border border-white/5">
                                 <input type="checkbox" checked={src.enabled} onChange={() => onToggle(i)} className="w-4 h-4 rounded border-white/10 bg-black/40 accent-amber-500 cursor-pointer" />
-                                <span className={`text-[10px] font-bold flex-1 truncate ${src.enabled ? 'text-white' : 'text-slate-600'}`}>{src.path}</span>
+                                <span className={`text-[11px] font-black flex-1 truncate transition-colors ${src.enabled ? 'text-white' : 'text-slate-700 italic'}`}>{src.path}</span>
                                 <button onClick={() => onRemove(i)} className="opacity-0 group-hover:opacity-100 p-1.5 hover:bg-red-500/20 hover:text-red-500 text-slate-500 rounded-lg transition-all">
                                     <LucideIcon name="trash-2" className="w-3.5 h-3.5" />
                                 </button>
@@ -310,10 +452,11 @@
                             value={newPath} 
                             onChange={(e) => setNewPath(e.target.value)} 
                             onKeyDown={(e) => e.key === 'Enter' && (onAdd(newPath), setNewPath(""))}
-                            placeholder="Add folder path..." 
+                            placeholder="Manual path..." 
                             className="bg-transparent text-[10px] font-bold text-white focus:outline-none flex-1 px-3 py-2 placeholder:text-slate-700" 
                         />
-                        <button onClick={() => (onAdd(newPath), setNewPath(""))} className="bg-amber-500 hover:bg-amber-400 text-black p-2 rounded-xl transition-all"><LucideIcon name="plus" className="w-4 h-4" /></button>
+                        <button onClick={() => (onAdd(newPath), setNewPath(""))} className="bg-emerald-500 hover:bg-emerald-400 text-black p-2 rounded-xl transition-all" title="Add manual path"><LucideIcon name="check" className="w-4 h-4" /></button>
+                        <button onClick={() => setIsPickerOpen(true)} className="bg-amber-500 hover:bg-amber-400 text-black p-2 rounded-xl transition-all" title="Browse server files"><LucideIcon name="folder-plus" className="w-4 h-4" /></button>
                     </div>
                 </div>
             );
@@ -323,6 +466,9 @@
             const [mediaPool, setMediaPool] = useState([]);
             const [sources, setSources] = useState([]);
             const [isPlaying, setIsPlaying] = useState(true);
+            const [isMuted, setIsMuted] = useState(true);
+            const [activeVideos, setActiveVideos] = useState([]);
+            const [layoutType, setLayoutType] = useState('grid'); // 'grid' (Justified) or 'mosaic' (BSP)
             const [density, setDensity] = useState(3);
             const [imageFit, setImageFit] = useState('cover');
             const [rotationSpeed, setRotationSpeed] = useState(10);
@@ -345,8 +491,24 @@
             const landscapePool = useMemo(() => mediaPool.filter(m => m.ratio >= 1), [mediaPool]);
             const portraitPool = useMemo(() => mediaPool.filter(m => m.ratio < 1), [mediaPool]);
 
-            // Layout Engine - Justified Partition with Height Normalization
-            const generateLayout = useCallback(() => {
+            // Audio Management: Track the oldest video
+            useEffect(() => {
+                const handleVideoActive = (e) => {
+                    setActiveVideos(prev => {
+                        const { id, spawnTime, active } = e.detail;
+                        if (!active) return prev.filter(v => v.id !== id);
+                        if (prev.find(v => v.id === id)) return prev;
+                        return [...prev, { id, spawnTime }].sort((a, b) => a.spawnTime - b.spawnTime);
+                    });
+                };
+                window.addEventListener('video-active', handleVideoActive);
+                return () => window.removeEventListener('video-active', handleVideoActive);
+            }, []);
+
+            const audioSourceId = activeVideos[0]?.id;
+
+            // Layout Engine 1: Justified Row Grid (Phase 1)
+            const generateJustifiedLayout = useCallback(() => {
                 const pool = mediaPoolRef.current;
                 if (!containerRef.current || pool.length === 0) return;
                 
@@ -356,8 +518,8 @@
                 
                 const targetRowHeight = height / Math.max(1, density);
                 const startIdx = Math.floor(Math.random() * pool.length);
-                const sampleSize = 100; // Larger sample to ensure we fill the screen
-                
+                const sampleSize = 100;
+
                 let currentRow = [];
                 let currentRowWidth = 0;
                 let accumulatedHeight = 0;
@@ -368,31 +530,24 @@
                     currentRow.push(item);
                     currentRowWidth += item.ratio * targetRowHeight;
 
-                    // If row is full, finalize it
                     if (currentRowWidth > width * 0.9) {
                         const scale = width / currentRowWidth;
                         const finalHeight = targetRowHeight * scale;
-                        
                         rows.push({ items: currentRow, height: finalHeight });
                         accumulatedHeight += finalHeight;
-                        
                         currentRow = [];
                         currentRowWidth = 0;
-
-                        // Stop once we have enough rows to cover the height
                         if (accumulatedHeight > height * 0.95) break;
                     }
                 }
 
-                // Handle leftover items in the final row if we didn't reach the bottom
                 if (currentRow.length > 0 && accumulatedHeight < height) {
                     const totalRatio = currentRow.reduce((acc, i) => acc + i.ratio, 0);
-                    const finalHeight = width / totalRatio; // Height that would make these items fill the width
+                    const finalHeight = width / totalRatio;
                     rows.push({ items: currentRow, height: finalHeight });
                     accumulatedHeight += finalHeight;
                 }
 
-                // Normalization: Scale all row heights so sum(heights) === viewport height
                 const globalScale = height / accumulatedHeight;
                 const newSlots = [];
                 let currentY = 0;
@@ -401,26 +556,69 @@
                     const normalizedHeight = row.height * globalScale;
                     let currentX = 0;
                     const rowTotalRatio = row.items.reduce((acc, i) => acc + i.ratio, 0);
-                    
                     for (const item of row.items) {
-                        // Recalculate width based on normalized height and item ratio
-                        // We use the item's share of the row's total ratio to ensure we fill the width exactly
                         const itemWidth = (item.ratio / rowTotalRatio) * width;
                         newSlots.push({
                             id: Math.random().toString(36).substr(2, 9),
-                            x: currentX,
-                            y: currentY,
-                            w: itemWidth,
-                            h: normalizedHeight,
-                            ratio: item.ratio
+                            x: currentX, y: currentY, w: itemWidth, h: normalizedHeight,
+                            ratio: item.ratio, type: 'justified'
                         });
                         currentX += itemWidth;
                     }
                     currentY += normalizedHeight;
                 }
-
                 setSlots(newSlots);
             }, [density]);
+
+            // Layout Engine 2: Dynamic BSP Mosaic (Phase 2)
+            const generateMosaicLayout = useCallback(() => {
+                if (!containerRef.current) return;
+                const width = containerRef.current.offsetWidth;
+                const height = containerRef.current.offsetHeight;
+                
+                const newSlots = [];
+                const maxDepth = Math.floor(density * 1.5);
+
+                const split = (x, y, w, h, depth) => {
+                    const ratio = w / h;
+                    
+                    // CONTENT-AWARE SPLITTING: 
+                    // If a box is "Extremely" wide or tall, we MUST split it further 
+                    // to fit more images and reduce letterboxing, regardless of density.
+                    const isExtreme = ratio > 2.2 || ratio < 0.45;
+                    const splitProbability = isExtreme ? 0.9 : 0.6;
+                    
+                    const isLeaf = depth >= maxDepth || (depth > 2 && Math.random() > splitProbability);
+
+                    if (isLeaf && !isExtreme) {
+                        newSlots.push({
+                            id: Math.random().toString(36).substr(2, 9),
+                            x, y, w, h, ratio,
+                            depth, parentId: null
+                        });
+                        return;
+                    }
+
+                    // Split along the longest axis
+                    if (w > h) {
+                        const splitPoint = w * (0.35 + Math.random() * 0.3);
+                        split(x, y, splitPoint, h, depth + 1);
+                        split(x + splitPoint, y, w - splitPoint, h, depth + 1);
+                    } else {
+                        const splitPoint = h * (0.35 + Math.random() * 0.3);
+                        split(x, y, w, splitPoint, depth + 1);
+                        split(x, y + splitPoint, w, h - splitPoint, depth + 1);
+                    }
+                };
+
+                split(0, 0, width, height, 0);
+                setSlots(newSlots);
+            }, [density]);
+
+            const generateLayout = useCallback(() => {
+                if (layoutType === 'grid') generateJustifiedLayout();
+                else generateMosaicLayout();
+            }, [layoutType, generateJustifiedLayout, generateMosaicLayout]);
 
             useEffect(() => {
                 generateLayout();
@@ -547,9 +745,12 @@
                             slot={slot} 
                             mediaPool={mediaPool}
                             isScanning={isScanning}
+                            layoutType={layoutType}
                             landscapePool={landscapePool} 
                             portraitPool={portraitPool}
                             isPlaying={isPlaying} 
+                            isMuted={isMuted}
+                            isAudioSource={slot.id === audioSourceId}
                             rotationSpeed={rotationSpeed}
                             imageFit={imageFit}
                             onRebuild={generateLayout}
@@ -595,6 +796,22 @@
                                 }}
                             />
                         </div>
+
+                        <button 
+                            onClick={() => setLayoutType(prev => prev === 'grid' ? 'mosaic' : 'grid')} 
+                            className={`w-12 h-12 rounded-2xl flex items-center justify-center transition-all ${layoutType === 'mosaic' ? 'bg-amber-500 text-black shadow-[0_0_20px_rgba(245,158,11,0.4)]' : 'bg-white/5 text-white'}`}
+                            title={`Current Layout: ${layoutType === 'grid' ? 'Stable Grid' : 'Dynamic Mosaic'}`}
+                        >
+                            <LucideIcon name={layoutType === 'grid' ? "layout-grid" : "layout-template"} className="w-6 h-6" />
+                        </button>
+
+                        <button 
+                            onClick={() => setIsMuted(!isMuted)} 
+                            className={`w-12 h-12 rounded-2xl flex items-center justify-center transition-all ${!isMuted ? 'bg-amber-500 text-black' : 'bg-white/5 text-white'}`}
+                            title={isMuted ? "Unmute Oldest Video" : "Mute All"}
+                        >
+                            <LucideIcon name={isMuted ? "volume-x" : "volume-2"} className="w-6 h-6" />
+                        </button>
 
                         <button onClick={() => setIsPlaying(!isPlaying)} className={`w-12 h-12 rounded-2xl flex items-center justify-center transition-all ${isPlaying ? 'bg-amber-500 text-black' : 'bg-white/5 text-white'}`}>
                             <LucideIcon name={isPlaying ? "pause" : "play"} className="w-6 h-6 fill-current" />

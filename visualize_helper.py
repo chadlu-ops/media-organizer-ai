@@ -175,6 +175,56 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                 "cwd": os.getcwd(),
                 "exists": CURRENT_ROOT.exists()
             })
+        elif self.path == '/api/slideshow/sources':
+            try:
+                if SLIDESHOW_SOURCES_FILE.exists():
+                    with open(SLIDESHOW_SOURCES_FILE, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    self.send_json(200, data)
+                else:
+                    self.send_json(200, [])
+            except Exception as e:
+                self.send_json(500, {"error": str(e)})
+        elif self.path.startswith('/api/fs/list'):
+            try:
+                parsed_url = urllib.parse.urlparse(self.path)
+                query = urllib.parse.parse_qs(parsed_url.query)
+                path_str = query.get('path', [''])[0]
+                
+                if not path_str:
+                    # Windows Drive Listing
+                    import string
+                    from ctypes import windll
+                    drives = []
+                    bitmask = windll.kernel32.GetLogicalDrives()
+                    for letter in string.ascii_uppercase:
+                        if bitmask & 1:
+                            drives.append(f"{letter}:/")
+                        bitmask >>= 1
+                    self.send_json(200, {"path": "", "folders": drives, "is_root": True})
+                    return
+
+                p = Path(path_str)
+                if not p.exists() or not p.is_dir():
+                    self.send_json(400, {"error": "Invalid path"})
+                    return
+                
+                folders = []
+                for child in p.iterdir():
+                    try:
+                        if child.is_dir() and not child.name.startswith('.'):
+                            folders.append(str(child).replace('\\', '/'))
+                    except: pass
+                
+                folders.sort()
+                self.send_json(200, {
+                    "path": str(p).replace('\\', '/'),
+                    "parent": str(p.parent).replace('\\', '/') if p.parent != p else None,
+                    "folders": folders,
+                    "is_root": False
+                })
+            except Exception as e:
+                self.send_json(500, {"error": str(e)})
         elif self.path.startswith('/_abs/'):
             try:
                 encoded_abs_path = self.path[6:]
