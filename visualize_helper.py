@@ -70,6 +70,15 @@ def get_all_lan_ips():
         pass
     return ips if ips else ['127.0.0.1']
 
+def log_corrupted_media(file_path, error_msg):
+    try:
+        corrupt_log = SCRIPT_DIR / "logs" / "corrupted_media.log"
+        corrupt_log.parent.mkdir(parents=True, exist_ok=True)
+        with open(corrupt_log, "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {file_path} - {error_msg}\n")
+    except:
+        pass
+
 def get_video_info(file_path):
     """Get width, height, and duration of a video using ffprobe, accounting for rotation."""
     try:
@@ -116,6 +125,7 @@ def get_video_info(file_path):
             return {"width": width, "height": height, "duration": duration, "rotation": rotation}
     except Exception as e:
         print(f"[FFPROBE ERR] {file_path}: {e}")
+        log_corrupted_media(file_path, f"FFPROBE ERR: {e}")
     return None
 
 def get_image_info(file_path):
@@ -126,8 +136,8 @@ def get_image_info(file_path):
             return {'width': w, 'height': h, 'ratio': w/h if h > 0 else 1.0}
     except Exception as e:
         print(f"[PIL ERR] {file_path}: {e}")
-        # Fallback for corrupted images so they don't block the grid
-        return {'width': 1000, 'height': 1000, 'ratio': 1.0}
+        log_corrupted_media(file_path, f"PIL ERR: {e}")
+        return None
 
 class ThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     address_family = socket.AF_INET  # Force IPv4 to avoid network resolution issues
@@ -775,6 +785,7 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                 recursive = params.get('recursive', True)
                 include_videos = params.get('include_videos', False)
                 max_video_duration = params.get('max_video_duration', 30)
+                fast_load = params.get('fast_load', False)
 
                 def run_background_scan():
                     global SCAN_REGISTRY, SCAN_STATUS
@@ -794,6 +805,12 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                         
                         SCAN_REGISTRY = new_registry
                         SCAN_STATUS["scanned"] = 0
+                        SCAN_STATUS["total"] = 0
+
+                    if fast_load:
+                        with SCAN_LOCK:
+                            SCAN_STATUS["running"] = False
+                        return
 
                     image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.webp'}
                     video_extensions = {'.mp4', '.mov', '.webm', '.mkv', '.m4v', '.avi'} if include_videos else set()
@@ -806,15 +823,23 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                         except: pass
 
                     from concurrent.futures import ThreadPoolExecutor
+                    import os
                     
                     found_files = []
                     for folder_str in folders:
                         base_path = Path(folder_str).resolve()
                         if not base_path.exists(): continue
-                        pattern = "**/*" if recursive else "*"
-                        for p in base_path.glob(pattern):
-                            if p.is_file() and p.suffix.lower() in (image_extensions | video_extensions):
-                                found_files.append(p)
+                        
+                        if recursive:
+                            for root, dirs, files in os.walk(base_path):
+                                root_path = Path(root)
+                                for file in files:
+                                    if Path(file).suffix.lower() in (image_extensions | video_extensions):
+                                        found_files.append(root_path / file)
+                        else:
+                            for p in base_path.iterdir():
+                                if p.is_file() and p.suffix.lower() in (image_extensions | video_extensions):
+                                    found_files.append(p)
 
                     # Quick filter: separate new files from cached ones
                     registry_lookup = {item["path"]: item for item in SCAN_REGISTRY}
