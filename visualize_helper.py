@@ -782,7 +782,17 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                     with SCAN_LOCK:
                         if SCAN_STATUS["running"]: return
                         SCAN_STATUS["running"] = True
-                        # Don't wipe SCAN_REGISTRY here; we'll merge new files into it
+                        
+                        # Filter the current registry to only keep items that are in the requested folders
+                        # This ensures that unchecking a folder actually removes its items.
+                        new_registry = []
+                        normalized_folders = [str(Path(f).resolve()).replace('\\', '/') for f in folders]
+                        for item in SCAN_REGISTRY:
+                            item_path = item["path"]
+                            if any(item_path.startswith(f) for f in normalized_folders):
+                                new_registry.append(item)
+                        
+                        SCAN_REGISTRY = new_registry
                         SCAN_STATUS["scanned"] = 0
 
                     image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.webp'}
