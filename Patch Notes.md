@@ -1,5 +1,11 @@
 # Patch Notes
 
+## [0.3.4] - 2026-05-02
+### ✨ Slideshow Viewer — Performance & Resilience
+- **Instantaneous Load Times**: Bypassed the deep disk scan on initial load by implementing a `fast_load` parameter that serves the existing media registry from memory instantly.
+- **Optimized Deep Scanning**: Replaced `pathlib.glob` with `os.walk` in the indexing engine, reducing full-directory scan times from minutes to seconds.
+- **Corrupted Media Handling**: The indexing engine now safely intercepts corrupted images and videos during metadata extraction instead of passing a 1000x1000 fallback, skipping them entirely and keeping the grid clean.
+- **Corrupted Media Logging**: Automatically logs all unreadable media file paths and specific system error details (from PIL or FFprobe) to a dedicated `logs/corrupted_media.log` file for easy troubleshooting.
 ## [0.3.3] - 2026-04-12
 ### ✨ Slideshow Viewer — The Living Wall
 - **Perfectly Contained Organic Layout**: Implemented a "Shrink-to-Fit" algorithm for Masonry mode that treats the entire grid as a single unit, perfectly containing it within the screen boundaries with zero cropping and zero overflow.
