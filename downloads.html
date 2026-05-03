@@ -551,6 +551,8 @@
                                                     )}
                                                     {subscriptions.map((sub, idx) => {
                                                         const lastPolled = sub.last_polled ? new Date(sub.last_polled * 1000).toLocaleString() : 'Never';
+                                                        const fileCount = sub.last_count !== undefined ? sub.last_count : 0;
+                                                        const mbSize = sub.last_size_mb !== undefined ? sub.last_size_mb.toFixed(1) : "0.0";
                                                         return (
                                                             <div key={idx} className="p-3 bg-white/5 rounded-2xl border border-white/5 hover:border-emerald-500/20 transition-all group">
                                                                 <div className="flex justify-between items-start mb-2">
@@ -565,8 +567,13 @@
                                                                 <div className="text-[10px] line-clamp-1 font-mono mb-2 text-slate-300">
                                                                     {sub.url}
                                                                 </div>
-                                                                <div className="text-[8px] font-bold text-slate-600 uppercase">
-                                                                    Last Checked: {lastPolled}
+                                                                <div className="text-[8px] font-bold text-slate-600 uppercase flex items-center justify-between">
+                                                                    <span>Last Checked: {lastPolled}</span>
+                                                                    {sub.last_polled && (
+                                                                        <span className="text-emerald-500/70">
+                                                                            +{fileCount} items ({mbSize} MB)
+                                                                        </span>
+                                                                    )}
                                                                 </div>
                                                             </div>
                                                         );

@@ -1486,6 +1486,10 @@ def run_subscription_poller():
                             
                             env = os.environ.copy()
                             env["PYTHONUNBUFFERED"] = "1"
+                            
+                            file_count = 0
+                            total_size_bytes = 0
+                            
                             process = subprocess.Popen(
                                 cmd,
                                 stdout=subprocess.PIPE,
@@ -1519,12 +1523,22 @@ def run_subscription_poller():
                                         line = str(raw_line)
                                     if line:
                                         DOWNLOAD_LOG.append(line)
+                                        if not line.startswith('[') and not line.startswith('#'):
+                                            try:
+                                                p = Path(line.strip())
+                                                if p.exists() and p.is_file():
+                                                    file_count += 1
+                                                    total_size_bytes += p.stat().st_size
+                                            except:
+                                                pass
                             
                             process.wait()
-                            DOWNLOAD_LOG.append(f"[AUTO-POLL] Finished background check for {url}")
+                            DOWNLOAD_LOG.append(f"[AUTO-POLL] Finished background check for {url}. Downloaded {file_count} files ({(total_size_bytes/1048576):.2f} MB).")
                             DOWNLOAD_IS_RUNNING = False
                             
                             sub["last_polled"] = time.time()
+                            sub["last_count"] = file_count
+                            sub["last_size_mb"] = total_size_bytes / 1048576.0
                             updated = True
                             
                 if updated:
