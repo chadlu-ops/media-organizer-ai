@@ -25,6 +25,8 @@ SCHEMA_CACHE_TTL = 2  # 2 second cache to prevent flood reloads
 DOWNLOAD_IS_RUNNING = False
 DOWNLOAD_LOG = []
 DOWNLOAD_HISTORY_FILE = SCRIPT_DIR / "download_history.json"
+SUBSCRIPTIONS_FILE = SCRIPT_DIR / "logs" / "subscriptions.json"
+DOWNLOAD_SETTINGS_FILE = SCRIPT_DIR / "logs" / "download_settings.json"
 MEDIA_METADATA_CACHE_FILE = SCRIPT_DIR / "logs" / "media_metadata_cache.json"
 SLIDESHOW_SOURCES_FILE = SCRIPT_DIR / "logs" / "slideshow_sources.json"
 SLIDESHOW_REGISTRY_FILE = SCRIPT_DIR / "logs" / "slideshow_registry.json"
@@ -383,6 +385,26 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                     self.send_json(200, {"history": history})
             else:
                 self.send_json(200, {"history": []})
+        elif self.path == '/api/downloads/subscriptions':
+            if SUBSCRIPTIONS_FILE.exists():
+                with open(SUBSCRIPTIONS_FILE, "r", encoding="utf-8") as f:
+                    try:
+                        subs = json.load(f)
+                    except:
+                        subs = []
+                    self.send_json(200, {"subscriptions": subs})
+            else:
+                self.send_json(200, {"subscriptions": []})
+        elif self.path == '/api/downloads/settings':
+            if DOWNLOAD_SETTINGS_FILE.exists():
+                with open(DOWNLOAD_SETTINGS_FILE, "r", encoding="utf-8") as f:
+                    try:
+                        settings = json.load(f)
+                    except:
+                        settings = {}
+                    self.send_json(200, {"settings": settings})
+            else:
+                self.send_json(200, {"settings": {}})
         elif self.path == '/api/images/seed':
             with SCAN_LOCK:
                 seed = SCAN_REGISTRY[:500]
@@ -1322,6 +1344,32 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
             except Exception as e:
                 self.send_json(500, {"error": str(e)})
 
+        elif self.path == '/api/downloads/subscriptions':
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                params = json.loads(post_data)
+                subs = params.get('subscriptions', [])
+                SUBSCRIPTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+                with open(SUBSCRIPTIONS_FILE, "w", encoding="utf-8") as f:
+                    json.dump(subs, f, indent=4)
+                self.send_json(200, {"status": "success"})
+            except Exception as e:
+                self.send_json(500, {"error": str(e)})
+
+        elif self.path == '/api/downloads/settings':
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            try:
+                params = json.loads(post_data)
+                settings = params.get('settings', {})
+                DOWNLOAD_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+                with open(DOWNLOAD_SETTINGS_FILE, "w", encoding="utf-8") as f:
+                    json.dump(settings, f, indent=4)
+                self.send_json(200, {"status": "success"})
+            except Exception as e:
+                self.send_json(500, {"error": str(e)})
+
         else:
             self.send_error(404, "Unknown API endpoint")
 
@@ -1358,11 +1406,144 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
             
         return str(root_path)
 
+def run_subscription_poller():
+    import time
+    while True:
+        try:
+            if SUBSCRIPTIONS_FILE.exists():
+                with open(SUBSCRIPTIONS_FILE, "r", encoding="utf-8") as f:
+                    try:
+                        subscriptions = json.load(f)
+                    except:
+                        subscriptions = []
+                
+                updated = False
+                now = time.time()
+                for sub in subscriptions:
+                    last_polled = sub.get("last_polled", 0)
+                    interval_hours = sub.get("interval", 1)
+                    interval_seconds = interval_hours * 3600
+                    
+                    if now - last_polled >= interval_seconds:
+                        global DOWNLOAD_IS_RUNNING, DOWNLOAD_LOG
+                        if DOWNLOAD_IS_RUNNING:
+                            continue # Wait for next check if a download is active
+                        
+                        # Storage check
+                        min_free_gb = 0
+                        if DOWNLOAD_SETTINGS_FILE.exists():
+                            try:
+                                with open(DOWNLOAD_SETTINGS_FILE, "r", encoding="utf-8") as fs:
+                                    min_free_gb = float(json.load(fs).get("min_free_gb", 0))
+                            except:
+                                pass
+                        
+                        target_dir = str(SCRIPT_DIR)
+                        config_path = SCRIPT_DIR / "gallery-dl.conf"
+                        if config_path.exists():
+                            try:
+                                with open(config_path, "r", encoding="utf-8") as fc:
+                                    # Strip comments (lines starting with // or #) and simple regex to grab base-directory if json fails
+                                    content = fc.read()
+                                    try:
+                                        c_json = json.loads(content)
+                                        ext = c_json.get("extractor", {})
+                                        base_dir = ext.get("base-directory")
+                                        if base_dir: target_dir = base_dir
+                                    except:
+                                        # Very basic fallback string search if config has comments breaking json parser
+                                        import re
+                                        match = re.search(r'"base-directory"\s*:\s*"([^"]+)"', content)
+                                        if match:
+                                            target_dir = match.group(1)
+                            except:
+                                pass
+                        
+                        if min_free_gb > 0:
+                            import shutil
+                            try:
+                                # Ensure the target directory exists before checking, or check its parent
+                                check_path = Path(target_dir)
+                                if not check_path.exists():
+                                    check_path.mkdir(parents=True, exist_ok=True)
+                                usage = shutil.disk_usage(str(check_path))
+                                free_gb = usage.free / (1024**3)
+                                if free_gb < min_free_gb:
+                                    print(f"[AUTO-POLL] Skipping check. Drive has {free_gb:.1f}GB free (requires {min_free_gb}GB).")
+                                    continue # Skip all polling this minute
+                            except Exception as e:
+                                print(f"[AUTO-POLL] Error checking disk usage for {target_dir}: {e}")
+
+                        url = sub.get("url")
+                        if url:
+                            DOWNLOAD_IS_RUNNING = True
+                            DOWNLOAD_LOG = [f"[AUTO-POLL] Starting background check for {url}..."]
+                            
+                            venv_python = SCRIPT_DIR / ".venv" / "Scripts" / "python.exe"
+                            gdl_cmd = [str(venv_python), "-m", "gallery_dl"] if venv_python.exists() else ["gallery-dl"]
+                            
+                            cmd = gdl_cmd + ["-c", "gallery-dl.conf", url]
+                            
+                            env = os.environ.copy()
+                            env["PYTHONUNBUFFERED"] = "1"
+                            process = subprocess.Popen(
+                                cmd,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT,
+                                bufsize=0,
+                                env=env,
+                                cwd=str(SCRIPT_DIR)
+                            )
+                            
+                            line_buffer = b''
+                            while True:
+                                if not DOWNLOAD_IS_RUNNING:
+                                    process.terminate()
+                                    DOWNLOAD_LOG.append(f"[AUTO-POLL] Terminating check...")
+                                    break
+                                chunk = process.stdout.read1(4096) if hasattr(process.stdout, 'read1') else process.stdout.read(1)
+                                if not chunk: break
+                                line_buffer += chunk
+                                while b'\n' in line_buffer or b'\r' in line_buffer:
+                                    n_pos = line_buffer.find(b'\n')
+                                    r_pos = line_buffer.find(b'\r')
+                                    split_pos = min(n_pos, r_pos) if n_pos != -1 and r_pos != -1 else (n_pos if r_pos == -1 else r_pos)
+                                    raw_line = line_buffer[:split_pos]
+                                    if split_pos + 1 < len(line_buffer) and line_buffer[split_pos:split_pos+2] == b'\r\n':
+                                        line_buffer = line_buffer[split_pos+2:]
+                                    else:
+                                        line_buffer = line_buffer[split_pos+1:]
+                                    try:
+                                        line = raw_line.decode('utf-8', errors='replace').strip()
+                                    except:
+                                        line = str(raw_line)
+                                    if line:
+                                        DOWNLOAD_LOG.append(line)
+                            
+                            process.wait()
+                            DOWNLOAD_LOG.append(f"[AUTO-POLL] Finished background check for {url}")
+                            DOWNLOAD_IS_RUNNING = False
+                            
+                            sub["last_polled"] = time.time()
+                            updated = True
+                            
+                if updated:
+                    with open(SUBSCRIPTIONS_FILE, "w", encoding="utf-8") as f:
+                        json.dump(subscriptions, f, indent=4)
+                        
+        except Exception as e:
+            print(f"[POLLER ERR] {e}")
+            
+        time.sleep(60)
+
 def run_server(initial_dir):
     global CURRENT_ROOT
     CURRENT_ROOT = initial_dir
     handler = WorkspaceHandler
     
+    # Start background poller thread
+    threading.Thread(target=run_subscription_poller, daemon=True).start()
+
     ThreadingTCPServer.allow_reuse_address = True
     # Explicitly bind to 0.0.0.0 to ensure network access on all interfaces
     with ThreadingTCPServer(("0.0.0.0", PORT), handler) as httpd:

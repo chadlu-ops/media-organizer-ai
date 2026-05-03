@@ -96,7 +96,10 @@
             const [activeTab, setActiveTab] = useState('download'); // 'download' | 'settings'
             const [isUpdating, setIsUpdating] = useState(false);
             const [history, setHistory] = useState([]);
-            const [leftTab, setLeftTab] = useState('queue'); // 'queue' | 'history'
+            const [subscriptions, setSubscriptions] = useState([]);
+            const [subInterval, setSubInterval] = useState(1);
+            const [minFreeGB, setMinFreeGB] = useState(10);
+            const [leftTab, setLeftTab] = useState('queue'); // 'queue' | 'history' | 'subscriptions'
             const [serverUrl] = useState(window.location.origin);
             const logEndRef = useRef(null);
 
@@ -157,6 +160,86 @@
                 const interval = setInterval(fetchHistory, 5000);
                 return () => clearInterval(interval);
             }, []);
+
+            const fetchSubscriptions = async () => {
+                try {
+                    const res = await fetch(`${serverUrl}/api/downloads/subscriptions`);
+                    if (res.ok) {
+                        const data = await res.json();
+                        setSubscriptions(data.subscriptions || []);
+                    }
+                } catch (e) { }
+            };
+
+            useEffect(() => {
+                fetchSubscriptions();
+                const interval = setInterval(fetchSubscriptions, 10000);
+                return () => clearInterval(interval);
+            }, []);
+
+            const fetchSettings = async () => {
+                try {
+                    const res = await fetch(`${serverUrl}/api/downloads/settings`);
+                    if (res.ok) {
+                        const data = await res.json();
+                        setMinFreeGB(data.settings?.min_free_gb || 0);
+                    }
+                } catch (e) { }
+            };
+
+            useEffect(() => {
+                fetchSettings();
+            }, []);
+
+            const saveSettings = async (newMinFree) => {
+                try {
+                    await fetch(`${serverUrl}/api/downloads/settings`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ settings: { min_free_gb: newMinFree } })
+                    });
+                } catch (e) { }
+            };
+
+            const handleMinFreeChange = (val) => {
+                const newMinFree = Math.max(0, val);
+                setMinFreeGB(newMinFree);
+                saveSettings(newMinFree);
+            };
+
+            const saveSubscriptions = async (subs) => {
+                try {
+                    const res = await fetch(`${serverUrl}/api/downloads/subscriptions`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ subscriptions: subs })
+                    });
+                    if (res.ok) {
+                        setSubscriptions(subs);
+                    }
+                } catch (e) {
+                    alert("Failed to save subscriptions");
+                }
+            };
+
+            const addSubscription = () => {
+                if (!urls.trim()) return;
+                const urlList = urls.split('\n').map(u => u.trim()).filter(u => u);
+                const newSubs = [...subscriptions];
+                for (const u of urlList) {
+                    if (!newSubs.find(s => s.url === u)) {
+                        newSubs.push({ url: u, interval: subInterval, last_polled: 0 });
+                    }
+                }
+                saveSubscriptions(newSubs);
+                setUrls("");
+                setLeftTab('subscriptions');
+            };
+
+            const removeSubscription = (url) => {
+                const newSubs = subscriptions.filter(s => s.url !== url);
+                saveSubscriptions(newSubs);
+            };
 
             const startDownload = async (force = false) => {
                 if (!urls.trim() || isRunning) return;
@@ -329,6 +412,12 @@
                                             >
                                                 Link History
                                             </button>
+                                            <button
+                                                onClick={() => setLeftTab('subscriptions')}
+                                                className={`px-4 py-1.5 text-[9px] font-black uppercase tracking-wider rounded-lg transition-all ${leftTab === 'subscriptions' ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/10' : 'text-slate-500 hover:text-slate-400'}`}
+                                            >
+                                                Subscriptions
+                                            </button>
                                         </div>
 
                                         {leftTab === 'queue' ? (
@@ -348,7 +437,7 @@
                                                     disabled={isRunning}
                                                 />
                                             </div>
-                                        ) : (
+                                        ) : leftTab === 'history' ? (
                                             <div className="relative flex-1 flex flex-col overflow-hidden">
                                                 <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-2">
                                                     <LucideIcon name="history" className="w-3.5 h-3.5 text-emerald-500" />
@@ -390,26 +479,122 @@
                                                     })}
                                                 </div>
                                             </div>
+                                        ) : (
+                                            <div className="relative flex-1 flex flex-col overflow-hidden">
+                                                <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-2">
+                                                    <LucideIcon name="clock" className="w-3.5 h-3.5 text-emerald-500" />
+                                                    Auto-Poll Subscriptions
+                                                </h3>
+                                                <p className="text-[10px] text-slate-500 font-medium mb-4 leading-relaxed shrink-0">
+                                                    Links below are polled in the background for new items.
+                                                </p>
+                                                
+                                                <div className="flex items-center gap-3 mb-4 shrink-0 bg-rose-500/5 border border-rose-500/10 p-3 rounded-xl">
+                                                    <LucideIcon name="hard-drive" className="w-4 h-4 text-rose-400" />
+                                                    <div className="flex-1">
+                                                        <div className="text-[9px] font-black uppercase tracking-widest text-rose-400 mb-0.5">Safety Protocol</div>
+                                                        <div className="text-[8px] text-slate-400 font-medium">Pause polling if free space falls below limit</div>
+                                                    </div>
+                                                    <div className="flex items-center bg-black/40 border border-white/5 rounded-lg overflow-hidden shrink-0">
+                                                        <input 
+                                                            type="number" 
+                                                            className="w-12 bg-transparent text-center text-xs font-mono focus:outline-none py-1 text-slate-300" 
+                                                            value={minFreeGB}
+                                                            onChange={(e) => handleMinFreeChange(parseInt(e.target.value) || 0)}
+                                                        />
+                                                        <span className="text-[9px] font-bold text-slate-500 pr-2">GB</span>
+                                                    </div>
+                                                </div>
+                                                
+                                                <div className="flex gap-2 mb-4 shrink-0">
+                                                    <textarea
+                                                        className="flex-1 bg-black/30 border border-white/5 rounded-xl p-3 text-xs font-mono text-emerald-400/80 focus:outline-none focus:border-emerald-500/30 transition-all resize-none shadow-inner h-12"
+                                                        placeholder="URL to subscribe to..."
+                                                        value={urls}
+                                                        onChange={(e) => setUrls(e.target.value)}
+                                                    />
+                                                    <div className="flex flex-col gap-1 w-20">
+                                                        <span className="text-[8px] font-black uppercase text-slate-500 text-center">Interval (hrs)</span>
+                                                        <div className="flex items-center bg-black/30 border border-white/5 rounded-lg overflow-hidden flex-1">
+                                                            <button 
+                                                                onClick={() => setSubInterval(Math.max(1, subInterval - 1))}
+                                                                className="w-6 hover:bg-white/10 flex items-center justify-center text-slate-400"
+                                                            >-</button>
+                                                            <input 
+                                                                type="number" 
+                                                                className="w-8 bg-transparent text-center text-xs font-mono focus:outline-none" 
+                                                                value={subInterval}
+                                                                readOnly
+                                                            />
+                                                            <button 
+                                                                onClick={() => setSubInterval(subInterval + 1)}
+                                                                className="w-6 hover:bg-white/10 flex items-center justify-center text-slate-400"
+                                                            >+</button>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                
+                                                <button
+                                                    onClick={addSubscription}
+                                                    disabled={!urls.trim()}
+                                                    className={`w-full py-2 mb-4 rounded-xl font-black text-[10px] uppercase tracking-widest transition-all ${!urls.trim() ? 'bg-slate-800 text-slate-600' : 'bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500 hover:text-white border border-emerald-500/30'}`}
+                                                >
+                                                    Add Subscription
+                                                </button>
+
+                                                <div className="flex-1 overflow-y-auto pr-2 space-y-3">
+                                                    {subscriptions.length === 0 && (
+                                                        <div className="py-10 text-center opacity-20">
+                                                            <LucideIcon name="bookmark" className="w-8 h-8 mx-auto mb-2" />
+                                                            <p className="text-[10px] uppercase font-black tracking-widest">No Active Subscriptions</p>
+                                                        </div>
+                                                    )}
+                                                    {subscriptions.map((sub, idx) => {
+                                                        const lastPolled = sub.last_polled ? new Date(sub.last_polled * 1000).toLocaleString() : 'Never';
+                                                        return (
+                                                            <div key={idx} className="p-3 bg-white/5 rounded-2xl border border-white/5 hover:border-emerald-500/20 transition-all group">
+                                                                <div className="flex justify-between items-start mb-2">
+                                                                    <span className="text-[9px] font-bold text-slate-500">Every {sub.interval}h</span>
+                                                                    <button 
+                                                                        onClick={() => removeSubscription(sub.url)}
+                                                                        className="text-[9px] font-black px-2 py-0.5 rounded-full bg-rose-500/10 text-rose-500 hover:bg-rose-500 hover:text-white transition-all opacity-0 group-hover:opacity-100"
+                                                                    >
+                                                                        Remove
+                                                                    </button>
+                                                                </div>
+                                                                <div className="text-[10px] line-clamp-1 font-mono mb-2 text-slate-300">
+                                                                    {sub.url}
+                                                                </div>
+                                                                <div className="text-[8px] font-bold text-slate-600 uppercase">
+                                                                    Last Checked: {lastPolled}
+                                                                </div>
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+                                            </div>
                                         )}
 
-                                        <div className="flex gap-2">
-                                            <button
-                                                onClick={() => startDownload(false)}
-                                                disabled={isRunning || !urls.trim()}
-                                                className={`flex-[2] py-4 rounded-2xl font-black text-xs uppercase tracking-[0.2em] transition-all flex items-center justify-center gap-3 ${isRunning || !urls.trim() || leftTab === 'history' ? 'bg-slate-800 text-slate-600' : 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-xl shadow-emerald-900/20 hover:scale-[1.02] active:scale-[0.98]'}`}
-                                            >
-                                                <LucideIcon name={isRunning ? 'loader-2' : 'play-circle'} className={`w-5 h-5 ${isRunning ? 'animate-spin' : ''}`} />
-                                                {isRunning ? 'Processing...' : 'Engage'}
-                                            </button>
-                                            <button
-                                                onClick={() => startDownload(true)}
-                                                disabled={isRunning || !urls.trim()}
-                                                className={`flex-1 py-4 rounded-2xl font-black text-[9px] uppercase tracking-widest transition-all border ${isRunning || !urls.trim() || leftTab === 'history' ? 'bg-slate-900/40 border-slate-800 text-slate-700' : 'bg-rose-500/10 border-rose-500/30 text-rose-500 hover:bg-rose-500 hover:text-white shadow-lg shadow-rose-900/10'}`}
-                                                title="Force re-scan and ignore archive"
-                                            >
-                                                Force
-                                            </button>
-                                        </div>
+                                        {leftTab !== 'subscriptions' && (
+                                            <div className="flex gap-2">
+                                                <button
+                                                    onClick={() => startDownload(false)}
+                                                    disabled={isRunning || !urls.trim()}
+                                                    className={`flex-[2] py-4 rounded-2xl font-black text-xs uppercase tracking-[0.2em] transition-all flex items-center justify-center gap-3 ${isRunning || !urls.trim() || leftTab === 'history' ? 'bg-slate-800 text-slate-600' : 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-xl shadow-emerald-900/20 hover:scale-[1.02] active:scale-[0.98]'}`}
+                                                >
+                                                    <LucideIcon name={isRunning ? 'loader-2' : 'play-circle'} className={`w-5 h-5 ${isRunning ? 'animate-spin' : ''}`} />
+                                                    {isRunning ? 'Processing...' : 'Engage'}
+                                                </button>
+                                                <button
+                                                    onClick={() => startDownload(true)}
+                                                    disabled={isRunning || !urls.trim()}
+                                                    className={`flex-1 py-4 rounded-2xl font-black text-[9px] uppercase tracking-widest transition-all border ${isRunning || !urls.trim() || leftTab === 'history' ? 'bg-slate-900/40 border-slate-800 text-slate-700' : 'bg-rose-500/10 border-rose-500/30 text-rose-500 hover:bg-rose-500 hover:text-white shadow-lg shadow-rose-900/10'}`}
+                                                    title="Force re-scan and ignore archive"
+                                                >
+                                                    Force
+                                                </button>
+                                            </div>
+                                        )}
                                     </div>
 
                                     {/* Sub-card: Pro Tip */}
