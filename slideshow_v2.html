@@ -183,7 +183,7 @@
             );
         };
 
-        const GridSlot = ({ slot, mediaPool, isScanning, layoutType, landscapePool, portraitPool, isPlaying, isMuted, isAudioSource, rotationSpeed, imageFit, onRebuild }) => {
+        const GridSlot = ({ slot, mediaPool, isScanning, layoutType, landscapePool, portraitPool, isPlaying, isMuted, isAudioSource, rotationSpeed, imageFit, onRebuild, autoReflow }) => {
             const [item, setItem] = useState(null);
             const [spawnTime, setSpawnTime] = useState(0);
             const [failCount, setFailCount] = useState(0);
@@ -248,9 +248,9 @@
                 }
             }, [isPlaying, slot.ratio, item, layoutType]);
 
-            // If stagnation limit reached, trigger mutation pulse
+            // If stagnation limit reached, trigger mutation pulse (only if autoReflow is on)
             useEffect(() => {
-                if (layoutType === 'mosaic' && stagnation >= 15) {
+                if (autoReflow && layoutType === 'mosaic' && stagnation >= 15) {
                     setIsMutating(true);
                     setTimeout(() => {
                         setIsMutating(false);
@@ -258,7 +258,7 @@
                     }, 1000);
                     setStagnation(0);
                 }
-            }, [stagnation, layoutType, onRebuild]);
+            }, [stagnation, layoutType, onRebuild, autoReflow]);
 
             // Share state with parent for audio selection
             useEffect(() => {
@@ -480,6 +480,7 @@
             const [scanningPath, setScanningPath] = useState("");
             const [isSourceMenuOpen, setIsSourceMenuOpen] = useState(false);
             const [showControls, setShowControls] = useState(true);
+            const [autoReflow, setAutoReflow] = useState(true);
             const [slots, setSlots] = useState([]);
             const mediaPoolRef = useRef([]);
             useEffect(() => { mediaPoolRef.current = mediaPool; }, [mediaPool]);
@@ -760,6 +761,7 @@
                             rotationSpeed={rotationSpeed}
                             imageFit={imageFit}
                             onRebuild={generateLayout}
+                            autoReflow={autoReflow}
                         />
                     ))}
 
@@ -813,9 +815,9 @@
                             </button>
 
                             <button 
-                                onClick={generateLayout} 
-                                className="w-9 h-9 sm:w-12 sm:h-12 rounded-xl sm:rounded-2xl flex items-center justify-center transition-all bg-white/5 text-white hover:bg-amber-500 hover:text-black"
-                                title="Force Screen Reflow"
+                                onClick={() => { setAutoReflow(prev => { const next = !prev; if (next) generateLayout(); return next; }); }} 
+                                className={`w-9 h-9 sm:w-12 sm:h-12 rounded-xl sm:rounded-2xl flex items-center justify-center transition-all ${autoReflow ? 'bg-amber-500 text-black shadow-[0_0_20px_rgba(245,158,11,0.4)]' : 'bg-white/5 text-white'}`}
+                                title={autoReflow ? 'Auto Reflow: ON (click to disable)' : 'Auto Reflow: OFF (click to enable & reflow)'}
                             >
                                 <LucideIcon name="refresh-ccw" className="w-4 h-4 sm:w-6 sm:h-6" />
                             </button>
