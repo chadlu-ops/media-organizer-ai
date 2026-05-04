@@ -1105,6 +1105,7 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                             start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             DOWNLOAD_LOG.append(f"\n[GDL] [{idx+1}/{len(urls)}] Processing: {url}")
                             file_count = 0
+                            total_size_bytes = 0
                             
                             current_cmd = gdl_cmd + ["-c", "gallery-dl.conf"]
                             if force:
@@ -1146,8 +1147,14 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                                         line = str(raw_line)
                                     if line:
                                         DOWNLOAD_LOG.append(line)
-                                        if not line.startswith('[') and ('.' in line or '/' in line or '\\' in line):
-                                            file_count += 1
+                                        if not line.startswith('[') and not line.startswith('#'):
+                                            try:
+                                                p = Path(line.strip())
+                                                if p.exists() and p.is_file():
+                                                    file_count += 1
+                                                    total_size_bytes += p.stat().st_size
+                                            except:
+                                                pass
                             
                             process.wait()
                             
@@ -1166,6 +1173,7 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                                     "timestamp": start_time,
                                     "urls": [url],
                                     "count": file_count,
+                                    "size_mb": round(total_size_bytes / 1048576.0, 2),
                                     "status": "Finished" if process.returncode == 0 else f"Error ({process.returncode})"
                                 })
                                 history = history[:100]
