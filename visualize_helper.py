@@ -124,7 +124,7 @@ def get_video_info(file_path):
             if abs(rotation) in [90, 270]:
                 width, height = height, width
                 
-            return {"width": width, "height": height, "duration": duration, "rotation": rotation}
+            return {"width": width, "height": height, "duration": duration, "ratio": width/height if height > 0 else 1.0, "rotation": rotation}
     except Exception as e:
         print(f"[FFPROBE ERR] {file_path}: {e}")
         log_corrupted_media(file_path, f"FFPROBE ERR: {e}")
@@ -806,6 +806,8 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                 folders = params.get('folders', [])
                 recursive = params.get('recursive', True)
                 include_videos = params.get('include_videos', False)
+                videos_only = params.get('videos_only', False)
+                images_only = params.get('images_only', False)
                 max_video_duration = params.get('max_video_duration', 30)
                 fast_load = params.get('fast_load', False)
 
@@ -816,14 +818,41 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                         if SCAN_STATUS["running"]: return
                         SCAN_STATUS["running"] = True
                         
+                        def save_registry_now():
+                            try:
+                                with SCAN_LOCK:
+                                    reg_snapshot = list(SCAN_REGISTRY)
+                                SLIDESHOW_REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
+                                with open(SLIDESHOW_REGISTRY_FILE, "w", encoding="utf-8") as f:
+                                    json.dump(reg_snapshot, f)
+                            except: pass
+
+                        def save_cache_now():
+                            try:
+                                # Note: cache is local to run_background_scan, so we'll need to pass it
+                                # or just let the main thread handle the periodic cache save.
+                                pass 
+                            except: pass
+                        
                         # Filter the current registry to only keep items that are in the requested folders
                         # This ensures that unchecking a folder actually removes its items.
                         new_registry = []
                         normalized_folders = [str(Path(f).resolve()).replace('\\', '/') for f in folders]
                         for item in SCAN_REGISTRY:
                             item_path = item["path"]
-                            if any(item_path.startswith(f) for f in normalized_folders):
-                                new_registry.append(item)
+                            is_video = item.get("type") == "video"
+                            
+                            # Filter by folder
+                            if not any(item_path.startswith(f) for f in normalized_folders):
+                                continue
+                                
+                            # Filter by type
+                            if videos_only and not is_video:
+                                continue
+                            if images_only and is_video:
+                                continue
+                                
+                            new_registry.append(item)
                         
                         SCAN_REGISTRY = new_registry
                         SCAN_STATUS["scanned"] = 0
@@ -835,7 +864,13 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                         return
 
                     image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.webp'}
-                    video_extensions = {'.mp4', '.mov', '.webm', '.mkv', '.m4v', '.avi'} if include_videos else set()
+                    if videos_only: image_extensions = set()
+                    
+                    video_extensions = {'.mp4', '.mov', '.webm', '.mkv', '.m4v', '.avi'} 
+                    if not include_videos or images_only: video_extensions = set()
+
+                    print(f"[Slideshow] Scanning with extensions: {image_extensions | video_extensions}")
+                    print(f"[Slideshow] Filter: videos_only={videos_only}, images_only={images_only}")
                     
                     cache = {}
                     if MEDIA_METADATA_CACHE_FILE.exists():
@@ -843,6 +878,24 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                             with open(MEDIA_METADATA_CACHE_FILE, "r", encoding="utf-8") as f:
                                 cache = json.load(f)
                         except: pass
+
+                    # Periodic saver thread
+                    stop_saver = False
+                    def periodic_saver():
+                        while not stop_saver:
+                            time.sleep(15) # Save every 15 seconds
+                            if stop_saver: break
+                            save_registry_now()
+                            # Save cache
+                            try:
+                                with SCAN_LOCK:
+                                    cache_snapshot = dict(cache)
+                                MEDIA_METADATA_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+                                with open(MEDIA_METADATA_CACHE_FILE, "w", encoding="utf-8") as f:
+                                    json.dump(cache_snapshot, f)
+                            except: pass
+                    
+                    threading.Thread(target=periodic_saver, daemon=True).start()
 
                     from concurrent.futures import ThreadPoolExecutor
                     import os
@@ -863,17 +916,17 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                                 if p.is_file() and p.suffix.lower() in (image_extensions | video_extensions):
                                     found_files.append(p)
 
-                    # Quick filter: separate new files from cached ones
+                    # Separate new files from cached ones
                     registry_lookup = {item["path"]: item for item in SCAN_REGISTRY}
-                    new_found_paths = []
-                    for p in found_files:
-                        p_str = str(p).replace('\\', '/')
-                        if p_str not in registry_lookup:
-                            new_found_paths.append(p)
+                    
+                    # If it's a full refresh (fast_load=False), we re-process ALL found files 
+                    # to ensure metadata (like video ratios) is up to date.
+                    # Otherwise, only process truly new files.
+                    files_to_process = found_files if not fast_load else [p for p in found_files if str(p).replace('\\', '/') not in registry_lookup]
                     
                     # Update status for progress bar
                     with SCAN_LOCK:
-                        SCAN_STATUS["total"] = len(new_found_paths)
+                        SCAN_STATUS["total"] = len(files_to_process)
                         SCAN_STATUS["scanned"] = 0
 
                     updated_cache = False
@@ -896,38 +949,43 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                                     updated_cache = True
                         
                         if info:
+                            # Filter videos by duration if specified
+                            if is_video and max_video_duration > 0:
+                                if info.get('duration', 0) > max_video_duration:
+                                    return
+
                             item = {
                                 "path": p_str,
                                 "type": "video" if is_video else "image",
                                 "ratio": info.get('ratio', 1.0),
                                 "width": info.get('width', 0),
                                 "height": info.get('height', 0),
+                                "duration": info.get('duration', 0) if is_video else 0,
                                 "orientation": "landscape" if info.get('width', 0) > info.get('height', 0) else "portrait"
                             }
                             with SCAN_LOCK:
-                                if p_str not in registry_lookup:
+                                if p_str in registry_lookup:
+                                    # Update existing item's metadata
+                                    old_item = registry_lookup[p_str]
+                                    old_item.update(item)
+                                else:
                                     SCAN_REGISTRY.append(item)
                                 SCAN_STATUS["scanned"] += 1
 
-                    # Process only NEW files in parallel
-                    if new_found_paths:
+                    # Process files in parallel
+                    if files_to_process:
                         with ThreadPoolExecutor(max_workers=8) as executor:
-                            executor.map(process_file, new_found_paths)
+                            executor.map(process_file, files_to_process)
                     
-                    # Periodic save of the whole registry
+                    # Final saves
+                    stop_saver = True
+                    save_registry_now()
                     try:
-                        SLIDESHOW_REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
-                        with open(SLIDESHOW_REGISTRY_FILE, "w", encoding="utf-8") as f:
-                            json.dump(SCAN_REGISTRY, f)
+                        MEDIA_METADATA_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+                        with open(MEDIA_METADATA_CACHE_FILE, "w", encoding="utf-8") as f:
+                            json.dump(cache, f)
                     except: pass
                     
-                    if updated_cache:
-                        try:
-                            MEDIA_METADATA_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-                            with open(MEDIA_METADATA_CACHE_FILE, "w", encoding="utf-8") as f:
-                                json.dump(cache, f)
-                        except: pass
-
                     with SCAN_LOCK:
                         SCAN_STATUS["running"] = False
 
