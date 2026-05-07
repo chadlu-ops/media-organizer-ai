@@ -100,6 +100,7 @@
             const [subInterval, setSubInterval] = useState(1);
             const [minFreeGB, setMinFreeGB] = useState(10);
             const [leftTab, setLeftTab] = useState('queue'); // 'queue' | 'history' | 'subscriptions'
+            const [showErrorsOnly, setShowErrorsOnly] = useState(false);
             const [serverUrl] = useState(window.location.origin);
             const logEndRef = useRef(null);
 
@@ -458,15 +459,16 @@
                                                     )}
                                                     {history.map((entry, idx) => {
                                                         const isError = entry.status && entry.status.includes('Error');
+                                                        const isAborted = entry.status === 'Aborted';
                                                         return (
-                                                            <div key={idx} className={`p-4 bg-white/5 rounded-2xl border transition-all group/item ${isError ? 'border-rose-500/20 bg-rose-500/5' : 'border-white/5 hover:border-emerald-500/20'}`}>
+                                                            <div key={idx} className={`p-4 bg-white/5 rounded-2xl border transition-all group/item ${isError ? 'border-rose-500/20 bg-rose-500/5' : isAborted ? 'border-amber-500/20 bg-amber-500/5' : 'border-white/5 hover:border-emerald-500/20'}`}>
                                                                 <div className="flex justify-between items-start mb-2">
                                                                     <span className="text-[9px] font-bold text-slate-500">{entry.timestamp}</span>
-                                                                    <span className={`text-[9px] font-black px-2 py-0.5 rounded-full ${isError ? 'bg-rose-500/20 text-rose-500 shadow-lg shadow-rose-500/10 animate-pulse' : 'bg-emerald-500/10 text-emerald-500'}`}>
-                                                                        {isError ? 'FAILED' : `${entry.count} Files`}
+                                                                    <span className={`text-[9px] font-black px-2 py-0.5 rounded-full ${isError ? 'bg-rose-500/20 text-rose-500 shadow-lg shadow-rose-500/10' : isAborted ? 'bg-amber-500/10 text-amber-500' : 'bg-emerald-500/10 text-emerald-500'}`}>
+                                                                        {isError ? 'FAILED' : isAborted ? 'ABORTED' : `${entry.count} Files`}
                                                                     </span>
                                                                 </div>
-                                                                <div className={`text-[10px] line-clamp-2 font-mono mb-3 opacity-70 ${isError ? 'text-rose-300' : 'text-slate-300'}`}>
+                                                                <div className={`text-[10px] line-clamp-2 font-mono mb-3 opacity-70 ${isError ? 'text-rose-300' : isAborted ? 'text-amber-300' : 'text-slate-300'}`}>
                                                                     {entry.urls.join(', ')}
                                                                 </div>
                                                                 <div className="flex gap-2">
@@ -755,6 +757,12 @@
                                             <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Live System Output</span>
                                         </div>
                                         <div className="flex items-center gap-4">
+                                            <button 
+                                                onClick={() => setShowErrorsOnly(!showErrorsOnly)} 
+                                                className={`text-[9px] font-black px-2 py-0.5 rounded transition-all ${showErrorsOnly ? 'bg-rose-500 text-white shadow-lg shadow-rose-500/20' : 'bg-slate-800 text-slate-400 hover:text-slate-300'}`}
+                                            >
+                                                Errors Only
+                                            </button>
                                             <span className="text-[9px] font-mono text-slate-600 uppercase">Buffer: {log.length} lines</span>
                                             <button onClick={() => setLog([])} className="text-[9px] font-black text-slate-600 hover:text-white uppercase tracking-tighter transition-colors">Clear Buffer</button>
                                         </div>
@@ -769,8 +777,10 @@
                                                 </div>
                                             )}
                                             {log.map((line, idx) => {
-                                                const isError = line.toLowerCase().includes('error') || line.toLowerCase().includes('failed');
-                                                const isSuccess = line.toLowerCase().includes('finished') || line.toLowerCase().includes('complete');
+                                                const isError = line.toLowerCase().includes('error') || line.toLowerCase().includes('failed') || line.includes('[GDL] Fatal');
+                                                const isSuccess = line.toLowerCase().includes('finished') || line.toLowerCase().includes('complete') || line.includes('Batch sequence complete');
+                                                
+                                                if (showErrorsOnly && !isError) return null;
                                                 const isPath = line.includes('downloads/');
                                                 
                                                 return (

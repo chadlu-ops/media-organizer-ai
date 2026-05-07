@@ -1151,6 +1151,29 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                     global DOWNLOAD_IS_RUNNING, DOWNLOAD_LOG
                     import time
                     
+                    # 1. Cleanup old logs (older than 7 days)
+                    try:
+                        logs_dir = SCRIPT_DIR / "logs" / "downloads"
+                        if logs_dir.exists():
+                            now_ts = time.time()
+                            for f in logs_dir.glob("*.log"):
+                                if now_ts - f.stat().st_mtime > 7 * 86400:
+                                    f.unlink()
+                    except: pass
+
+                    # 2. Setup session log
+                    session_file = SCRIPT_DIR / "logs" / "downloads" / f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+                    session_file.parent.mkdir(parents=True, exist_ok=True)
+                    
+                    def log_both(msg):
+                        DOWNLOAD_LOG.append(msg)
+                        try:
+                            with open(session_file, "a", encoding="utf-8") as f:
+                                f.write(msg + "\n")
+                        except: pass
+
+                    log_both(DOWNLOAD_LOG[0]) if DOWNLOAD_LOG else None
+                    
                     try:
                         env = os.environ.copy()
                         env["PYTHONUNBUFFERED"] = "1"
@@ -1204,7 +1227,7 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                                     except:
                                         line = str(raw_line)
                                     if line:
-                                        DOWNLOAD_LOG.append(line)
+                                        log_both(line)
                                         if not line.startswith('[') and not line.startswith('#'):
                                             try:
                                                 p = Path(line.strip())
@@ -1232,7 +1255,7 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                                     "urls": [url],
                                     "count": file_count,
                                     "size_mb": round(total_size_bytes / 1048576.0, 2),
-                                    "status": "Finished" if process.returncode == 0 else f"Error ({process.returncode})"
+                                    "status": "Finished" if process.returncode == 0 else ("Aborted" if not DOWNLOAD_IS_RUNNING else f"Error ({process.returncode})")
                                 })
                                 history = history[:100]
                                 with open(DOWNLOAD_HISTORY_FILE, "w", encoding="utf-8") as f:
@@ -1241,13 +1264,23 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                                 print(f"[GDL] History update error: {hist_e}")
 
                             if idx < len(urls) - 1 and DOWNLOAD_IS_RUNNING:
-                                DOWNLOAD_LOG.append("[GDL] Cooling down for 5 seconds...")
+                                log_both("[GDL] Cooling down for 5 seconds...")
                                 time.sleep(5)
                                 
-                        DOWNLOAD_LOG.append("\n[GDL] Batch sequence complete.")
+                        if DOWNLOAD_IS_RUNNING:
+                            log_both("\n[GDL] Batch sequence complete.")
+                        else:
+                            log_both("\n[GDL] Batch sequence aborted.")
 
                     except Exception as e:
-                        DOWNLOAD_LOG.append(f"[GDL] Fatal Error: {e}")
+                        err_msg = f"[GDL] Fatal Error: {e}"
+                        log_both(err_msg)
+                        try:
+                            error_log = SCRIPT_DIR / "logs" / "download_errors.log"
+                            error_log.parent.mkdir(parents=True, exist_ok=True)
+                            with open(error_log, "a", encoding="utf-8") as f:
+                                f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {err_msg}\n")
+                        except: pass
                     finally:
                         DOWNLOAD_IS_RUNNING = False
 
