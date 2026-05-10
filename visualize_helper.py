@@ -1147,13 +1147,17 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                     msg += " (FORCE MODE ENABLED)"
                 DOWNLOAD_LOG = [f"{msg} ({len(urls)} items)..."]
                 
+                # Ensure logs directory exists immediately
+                logs_dir = SCRIPT_DIR / "logs" / "downloads"
+                logs_dir.mkdir(parents=True, exist_ok=True)
+                print(f"[GDL] Active logs will be stored in: {logs_dir}")
+
                 def run_gdl():
                     global DOWNLOAD_IS_RUNNING, DOWNLOAD_LOG
                     import time
                     
                     # 1. Cleanup old logs (older than 7 days)
                     try:
-                        logs_dir = SCRIPT_DIR / "logs" / "downloads"
                         if logs_dir.exists():
                             now_ts = time.time()
                             for f in logs_dir.glob("*.log"):
@@ -1162,8 +1166,7 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                     except: pass
 
                     # 2. Setup session log
-                    session_file = SCRIPT_DIR / "logs" / "downloads" / f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-                    session_file.parent.mkdir(parents=True, exist_ok=True)
+                    session_file = logs_dir / f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
                     
                     def log_both(msg):
                         DOWNLOAD_LOG.append(msg)
@@ -1507,6 +1510,9 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
 
 def run_subscription_poller():
     import time
+    from datetime import datetime
+    
+    logs_dir = SCRIPT_DIR / "logs" / "downloads"
     while True:
         try:
             if SUBSCRIPTIONS_FILE.exists():
@@ -1576,7 +1582,29 @@ def run_subscription_poller():
                         url = sub.get("url")
                         if url:
                             DOWNLOAD_IS_RUNNING = True
-                            DOWNLOAD_LOG = [f"[AUTO-POLL] Starting background check for {url}..."]
+                            
+                            # Setup auto session log
+                            logs_dir.mkdir(parents=True, exist_ok=True)
+                            
+                            # Cleanup old logs (older than 7 days)
+                            try:
+                                now_ts = time.time()
+                                for f_old in logs_dir.glob("*.log"):
+                                    if now_ts - f_old.stat().st_mtime > 7 * 86400:
+                                        f_old.unlink()
+                            except: pass
+
+                            session_file = logs_dir / f"auto_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+                            
+                            def log_both(msg):
+                                DOWNLOAD_LOG.append(msg)
+                                try:
+                                    with open(session_file, "a", encoding="utf-8") as f:
+                                        f.write(msg + "\n")
+                                except: pass
+
+                            DOWNLOAD_LOG = []
+                            log_both(f"[AUTO-POLL] Starting background check for {url}...")
                             
                             venv_python = SCRIPT_DIR / ".venv" / "Scripts" / "python.exe"
                             gdl_cmd = [str(venv_python), "-m", "gallery_dl"] if venv_python.exists() else ["gallery-dl"]
@@ -1602,7 +1630,7 @@ def run_subscription_poller():
                             while True:
                                 if not DOWNLOAD_IS_RUNNING:
                                     process.terminate()
-                                    DOWNLOAD_LOG.append(f"[AUTO-POLL] Terminating check...")
+                                    log_both(f"[AUTO-POLL] Terminating check...")
                                     break
                                 chunk = process.stdout.read1(4096) if hasattr(process.stdout, 'read1') else process.stdout.read(1)
                                 if not chunk: break
@@ -1621,7 +1649,7 @@ def run_subscription_poller():
                                     except:
                                         line = str(raw_line)
                                     if line:
-                                        DOWNLOAD_LOG.append(line)
+                                        log_both(line)
                                         if not line.startswith('[') and not line.startswith('#'):
                                             try:
                                                 p = Path(line.strip())
@@ -1632,7 +1660,7 @@ def run_subscription_poller():
                                                 pass
                             
                             process.wait()
-                            DOWNLOAD_LOG.append(f"[AUTO-POLL] Finished background check for {url}. Downloaded {file_count} files ({(total_size_bytes/1048576):.2f} MB).")
+                            log_both(f"[AUTO-POLL] Finished background check for {url}. Downloaded {file_count} files ({(total_size_bytes/1048576):.2f} MB).")
                             DOWNLOAD_IS_RUNNING = False
                             
                             sub["last_polled"] = time.time()
