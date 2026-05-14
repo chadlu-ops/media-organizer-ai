@@ -154,7 +154,13 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def end_headers(self):
-        self.send_header('Access-Control-Allow-Origin', '*')
+        origin = self.headers.get('Origin')
+        if origin:
+            parsed_origin = urllib.parse.urlparse(origin)
+            hostname = parsed_origin.hostname
+            allowed_hosts = ['localhost', '127.0.0.1'] + get_all_lan_ips()
+            if hostname in allowed_hosts:
+                self.send_header('Access-Control-Allow-Origin', origin)
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate')
