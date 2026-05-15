@@ -749,6 +749,7 @@ def phase1_video_sorting(
             deep_hashes.append(data)
 
     processed_paths = set()
+    seen_dest_paths = set()
 
     def handle_video(data, cluster_id, reason, confidence, dest_base_dir, review_needed=False, match_source=None):
         fpath = data["path"]
@@ -770,10 +771,11 @@ def phase1_video_sorting(
                 dest_dir = dest_h
 
         dest = dest_dir / fpath.name
-        if dest.exists() or any(e["New_Path"] == str(dest) for e in entries):
+        if dest.exists() or str(dest) in seen_dest_paths:
             stem, suffix = dest.stem, dest.suffix
             dest = dest_dir / f"{stem}_{short_path_hash(fpath)}{suffix}"
 
+        seen_dest_paths.add(str(dest))
         safe_action(fpath, dest, dry_run, action=action)
         entries.append({
             "Original_Path": str(fpath),
@@ -872,6 +874,7 @@ def phase2_deduplication(
     entries: list[dict] = []
     unique: list[Path] = []
     seen_hashes: dict[str, Path] = {}
+    seen_filenames = set()
     image_files = [f for f in files if f.suffix.lower() in IMAGE_EXTENSIONS]
     non_image_files = [f for f in files if f.suffix.lower() not in IMAGE_EXTENSIONS]
 
@@ -893,13 +896,12 @@ def phase2_deduplication(
         if h in seen_hashes:
             dest = dup_dir / fpath.name
             # Collision-safe naming
-            if dest.exists() or any(
-                e["New_Filename"] == dest.name for e in entries
-            ):
+            if dest.exists() or dest.name in seen_filenames:
                 stem = dest.stem
                 suffix = dest.suffix
                 dest = dup_dir / f"{stem}_{short_path_hash(fpath)}{suffix}"
 
+            seen_filenames.add(dest.name)
             safe_action(fpath, dest, dry_run, action=action)
             entries.append(
                 {
@@ -961,6 +963,7 @@ def phase2b_folder_flattening(
     path_to_hash = {}
 
     # 2. Process each folder
+    seen_filenames = set()
     for rel_path, paths in sorted(folders.items()):
         parent_name = rel_path.name
         is_root = (rel_path == Path("[ROOT]"))
@@ -987,11 +990,12 @@ def phase2b_folder_flattening(
             dest = org_root / new_name
             
             # Collision-safe naming
-            if dest.exists() or any(e["New_Filename"] == dest.name for e in entries):
+            if dest.exists() or dest.name in seen_filenames:
                 stem = dest.stem
                 suffix = dest.suffix
                 dest = org_root / f"{stem}_{short_path_hash(fpath)}{suffix}"
             
+            seen_filenames.add(dest.name)
             safe_action(fpath, dest, dry_run, action=action)
             
             entries.append({
