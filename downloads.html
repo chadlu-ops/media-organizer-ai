@@ -92,6 +92,9 @@
             const [urls, setUrls] = useState("");
             const [isRunning, setIsRunning] = useState(false);
             const [log, setLog] = useState([]);
+            const [subIsRunning, setSubIsRunning] = useState(false);
+            const [subLog, setSubLog] = useState([]);
+            const [logView, setLogView] = useState('manual'); // 'manual' | 'subscription' | 'all'
             const [config, setConfig] = useState("");
             const [activeTab, setActiveTab] = useState('download'); // 'download' | 'settings'
             const [isUpdating, setIsUpdating] = useState(false);
@@ -121,6 +124,8 @@
                             const data = await res.json();
                             setIsRunning(data.running);
                             setLog(data.log || []);
+                            setSubIsRunning(data.subscription_running);
+                            setSubLog(data.subscription_log || []);
                         }
                     } catch (e) {
                         console.error("Status check failed", e);
@@ -352,6 +357,12 @@
                             </div>
                             
                             <div className="flex items-center gap-3 pl-6 border-l border-white/10">
+                                {subIsRunning && (
+                                    <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-indigo-500/10 border border-indigo-500/20 mr-2" title="Subscription Check Running">
+                                        <div className="w-2 h-2 rounded-full bg-indigo-500 status-pulse"></div>
+                                        <span className="text-[10px] font-black text-indigo-500 uppercase tracking-widest">Polling</span>
+                                    </div>
+                                )}
                                 {isRunning ? (
                                     <div className="flex items-center gap-2">
                                         <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/20">
@@ -382,7 +393,7 @@
                                 )}
                                 <button 
                                     onClick={updateApp}
-                                    disabled={isRunning}
+                                    disabled={isRunning || subIsRunning}
                                     className="w-10 h-10 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center hover:bg-indigo-500/20 transition-all group disabled:opacity-50"
                                     title="Check for updates"
                                 >
@@ -583,6 +594,11 @@
                                                                         </span>
                                                                     )}
                                                                 </div>
+                                                                {sub.last_status && sub.last_status.includes('Error') && (
+                                                                    <div className="mt-1 text-[8px] font-black uppercase text-rose-500 bg-rose-500/10 px-2 py-0.5 rounded-full inline-block">
+                                                                        Status: {sub.last_status}
+                                                                    </div>
+                                                                )}
                                                             </div>
                                                         );
                                                     })}
@@ -599,20 +615,6 @@
                                                     const now = new Date();
                                                     let dayCount = 0, weekCount = 0, monthCount = 0;
                                                     const linkStats = {};
-
-                                                    history.forEach(entry => {
-                                                        const entryDate = new Date(entry.timestamp);
-                                                        const diffDays = (now - entryDate) / (1000 * 60 * 60 * 24);
-                                                        if (diffDays <= 1) dayCount += entry.count;
-                                                        if (diffDays <= 7) weekCount += entry.count;
-                                                        if (diffDays <= 30) monthCount += entry.count;
-                                                        
-                                                        entry.urls.forEach(u => {
-                                                            if (!linkStats[u]) linkStats[u] = { count: 0, size_mb: 0 };
-                                                            linkStats[u].count += entry.count;
-                                                            if (entry.size_mb) linkStats[u].size_mb += entry.size_mb;
-                                                        });
-                                                    });
 
                                                     subscriptions.forEach(sub => {
                                                         const u = sub.url;
@@ -753,8 +755,27 @@
                                 <div className="flex-1 flex flex-col bg-slate-950/50 rounded-3xl border border-white/5 overflow-hidden shadow-2xl relative">
                                     <div className="h-12 flex items-center justify-between px-6 bg-slate-900/50 border-b border-white/5 shrink-0">
                                         <div className="flex items-center gap-2">
-                                            <div className="w-2 h-2 rounded-full bg-slate-700"></div>
-                                            <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Live System Output</span>
+                                            <div className={`w-2 h-2 rounded-full ${(logView === 'manual' ? isRunning : logView === 'subscription' ? subIsRunning : (isRunning || subIsRunning)) ? 'bg-emerald-500 status-pulse' : 'bg-slate-700'}`}></div>
+                                            <div className="flex bg-black/40 rounded-lg p-0.5 ml-2">
+                                                <button
+                                                    onClick={() => setLogView('manual')}
+                                                    className={`px-3 py-1 rounded text-[9px] font-black uppercase tracking-widest transition-all ${logView === 'manual' ? 'bg-emerald-500 text-white' : 'text-slate-500 hover:text-slate-300'}`}
+                                                >
+                                                    Manual
+                                                </button>
+                                                <button
+                                                    onClick={() => setLogView('subscription')}
+                                                    className={`px-3 py-1 rounded text-[9px] font-black uppercase tracking-widest transition-all ${logView === 'subscription' ? 'bg-emerald-500 text-white' : 'text-slate-500 hover:text-slate-300'}`}
+                                                >
+                                                    Subscriptions
+                                                </button>
+                                                <button
+                                                    onClick={() => setLogView('all')}
+                                                    className={`px-3 py-1 rounded text-[9px] font-black uppercase tracking-widest transition-all ${logView === 'all' ? 'bg-emerald-500 text-white' : 'text-slate-500 hover:text-slate-300'}`}
+                                                >
+                                                    All
+                                                </button>
+                                            </div>
                                         </div>
                                         <div className="flex items-center gap-4">
                                             <button 
@@ -763,40 +784,58 @@
                                             >
                                                 Errors Only
                                             </button>
-                                            <span className="text-[9px] font-mono text-slate-600 uppercase">Buffer: {log.length} lines</span>
-                                            <button onClick={() => setLog([])} className="text-[9px] font-black text-slate-600 hover:text-white uppercase tracking-tighter transition-colors">Clear Buffer</button>
+                                            <span className="text-[9px] font-mono text-slate-600 uppercase">
+                                                Buffer: {logView === 'manual' ? log.length : logView === 'subscription' ? subLog.length : log.length + subLog.length} lines
+                                            </span>
+                                            <button onClick={() => {
+                                                if (logView === 'manual' || logView === 'all') setLog([]);
+                                                if (logView === 'subscription' || logView === 'all') setSubLog([]);
+                                            }} className="text-[9px] font-black text-slate-600 hover:text-white uppercase tracking-tighter transition-colors">Clear Buffer</button>
                                         </div>
                                     </div>
                                     
                                     <div className="flex-1 overflow-y-auto p-6 scrollbar-thin scrollbar-thumb-white/5">
                                         <div className="console-log space-y-1">
-                                            {log.length === 0 && (
-                                                <div className="h-full flex flex-col items-center justify-center opacity-20 py-20">
-                                                    <LucideIcon name="terminal" className="w-12 h-12 mb-4" />
-                                                    <p className="text-xs font-black uppercase tracking-widest">Awaiting Command Stream...</p>
-                                                </div>
-                                            )}
-                                            {log.map((line, idx) => {
-                                                const isError = line.toLowerCase().includes('error') || line.toLowerCase().includes('failed') || line.includes('[GDL] Fatal');
-                                                const isSuccess = line.toLowerCase().includes('finished') || line.toLowerCase().includes('complete') || line.includes('Batch sequence complete');
+                                            {(() => {
+                                                let displayLog = [];
+                                                if (logView === 'manual') displayLog = log.map(l => ({ text: l, type: 'manual' }));
+                                                else if (logView === 'subscription') displayLog = subLog.map(l => ({ text: l, type: 'sub' }));
+                                                else displayLog = [...log.map(l => ({ text: l, type: 'manual' })), ...subLog.map(l => ({ text: l, type: 'sub' }))];
                                                 
-                                                if (showErrorsOnly && !isError) return null;
-                                                const isPath = line.includes('downloads/');
-                                                
-                                                return (
-                                                    <div key={idx} className="flex gap-4 group hover:bg-white/5 transition-colors rounded px-2 -mx-2">
-                                                        <span className="shrink-0 w-8 text-[9px] text-slate-700 font-mono text-right select-none">{idx + 1}</span>
-                                                        <span className={`break-all ${isError ? 'text-rose-400 font-bold' : isSuccess ? 'text-emerald-400 font-bold' : isPath ? 'text-indigo-400' : 'text-slate-400'}`}>
-                                                            {line}
-                                                        </span>
-                                                    </div>
-                                                );
-                                            })}
+                                                if (displayLog.length === 0) {
+                                                    return (
+                                                        <div className="h-full flex flex-col items-center justify-center opacity-20 py-20">
+                                                            <LucideIcon name="terminal" className="w-12 h-12 mb-4" />
+                                                            <p className="text-xs font-black uppercase tracking-widest">Awaiting Command Stream...</p>
+                                                        </div>
+                                                    );
+                                                }
+
+                                                return displayLog.map((lineObj, idx) => {
+                                                    const line = lineObj.text;
+                                                    const isError = line.toLowerCase().includes('error') || line.toLowerCase().includes('failed') || line.includes('[GDL] Fatal');
+                                                    const isSuccess = line.toLowerCase().includes('finished') || line.toLowerCase().includes('complete') || line.includes('Batch sequence complete');
+
+                                                    if (showErrorsOnly && !isError) return null;
+                                                    const isPath = line.includes('downloads/');
+
+                                                    return (
+                                                        <div key={idx} className="flex gap-4 group hover:bg-white/5 transition-colors rounded px-2 -mx-2 items-start">
+                                                            <span className={`shrink-0 w-8 text-[8px] font-black uppercase tracking-tighter text-right select-none mt-0.5 ${lineObj.type === 'manual' ? 'text-emerald-700' : 'text-indigo-700'}`}>
+                                                                {lineObj.type === 'manual' ? 'MNL' : 'SUB'}
+                                                            </span>
+                                                            <span className={`break-all ${isError ? 'text-rose-400 font-bold' : isSuccess ? 'text-emerald-400 font-bold' : isPath ? 'text-indigo-400' : 'text-slate-400'}`}>
+                                                                {line}
+                                                            </span>
+                                                        </div>
+                                                    );
+                                                });
+                                            })()}
                                             <div ref={logEndRef} />
                                         </div>
                                     </div>
 
-                                    {isRunning && (
+                                    {(logView === 'manual' ? isRunning : logView === 'subscription' ? subIsRunning : (isRunning || subIsRunning)) && (
                                         <div className="h-1 bg-slate-900 relative">
                                             <div className="absolute inset-0 bg-emerald-500/40 animate-[shimmer_2s_infinite]"></div>
                                         </div>

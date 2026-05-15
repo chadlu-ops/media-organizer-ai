@@ -24,6 +24,8 @@ SCHEMA_CACHE = {"data": None, "time": 0}
 SCHEMA_CACHE_TTL = 2  # 2 second cache to prevent flood reloads
 DOWNLOAD_IS_RUNNING = False
 DOWNLOAD_LOG = []
+SUBSCRIPTION_IS_RUNNING = False
+SUBSCRIPTION_LOG = []
 DOWNLOAD_HISTORY_FILE = SCRIPT_DIR / "download_history.json"
 SUBSCRIPTIONS_FILE = SCRIPT_DIR / "logs" / "subscriptions.json"
 DOWNLOAD_SETTINGS_FILE = SCRIPT_DIR / "logs" / "download_settings.json"
@@ -366,7 +368,9 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
         elif self.path == '/api/downloads/status':
             self.send_json(200, {
                 "running": DOWNLOAD_IS_RUNNING,
-                "log": DOWNLOAD_LOG[-100:]
+                "log": DOWNLOAD_LOG[-100:],
+                "subscription_running": SUBSCRIPTION_IS_RUNNING,
+                "subscription_log": SUBSCRIPTION_LOG[-100:]
             })
         elif self.path == '/api/downloads/config':
             config_path = SCRIPT_DIR / "gallery-dl.conf"
@@ -406,8 +410,11 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
             else:
                 self.send_json(200, {"settings": {}})
         elif self.path == '/api/images/seed':
+            import random
             with SCAN_LOCK:
-                seed = SCAN_REGISTRY[:500]
+                seed_pool = list(SCAN_REGISTRY)
+                random.shuffle(seed_pool)
+                seed = seed_pool[:500]
                 self.send_json(200, {"items": seed, "total": len(SCAN_REGISTRY), "status": SCAN_STATUS})
         elif self.path.startswith('/api/images/index'):
             query = urllib.parse.urlparse(self.path).query
@@ -430,7 +437,7 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
             return super().do_GET()
 
     def do_POST(self):
-        global CURRENT_ROOT, IS_RUNNING, PROGRESS_LOG, DOWNLOAD_IS_RUNNING, DOWNLOAD_LOG
+        global CURRENT_ROOT, IS_RUNNING, PROGRESS_LOG, DOWNLOAD_IS_RUNNING, DOWNLOAD_LOG, SUBSCRIPTION_IS_RUNNING, SUBSCRIPTION_LOG
         if self.path == '/api/set_root' or self.path.startswith('/api/set_root?'):
             content_length = int(self.headers['Content-Length'])
             post_data = self.rfile.read(content_length)
@@ -473,6 +480,7 @@ class WorkspaceHandler(http.server.SimpleHTTPRequestHandler):
                 data = json.loads(post_data)
                 if data.get('running') == False:
                     DOWNLOAD_IS_RUNNING = False
+                    SUBSCRIPTION_IS_RUNNING = False
                     self.send_json(200, {"status": "stopping_requested"})
                 else:
                     self.send_json(400, {"error": "Invalid request"})
@@ -1530,8 +1538,8 @@ def run_subscription_poller():
                     interval_seconds = interval_hours * 3600
                     
                     if now - last_polled >= interval_seconds:
-                        global DOWNLOAD_IS_RUNNING, DOWNLOAD_LOG
-                        if DOWNLOAD_IS_RUNNING:
+                        global SUBSCRIPTION_IS_RUNNING, SUBSCRIPTION_LOG
+                        if SUBSCRIPTION_IS_RUNNING:
                             continue # Wait for next check if a download is active
                         
                         # Storage check
@@ -1581,7 +1589,7 @@ def run_subscription_poller():
 
                         url = sub.get("url")
                         if url:
-                            DOWNLOAD_IS_RUNNING = True
+                            SUBSCRIPTION_IS_RUNNING = True
                             
                             # Setup auto session log
                             logs_dir.mkdir(parents=True, exist_ok=True)
@@ -1597,13 +1605,13 @@ def run_subscription_poller():
                             session_file = logs_dir / f"auto_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
                             
                             def log_both(msg):
-                                DOWNLOAD_LOG.append(msg)
+                                SUBSCRIPTION_LOG.append(msg)
                                 try:
                                     with open(session_file, "a", encoding="utf-8") as f:
                                         f.write(msg + "\n")
                                 except: pass
 
-                            DOWNLOAD_LOG = []
+                            SUBSCRIPTION_LOG = []
                             log_both(f"[AUTO-POLL] Starting background check for {url}...")
                             
                             venv_python = SCRIPT_DIR / ".venv" / "Scripts" / "python.exe"
@@ -1628,7 +1636,7 @@ def run_subscription_poller():
                             
                             line_buffer = b''
                             while True:
-                                if not DOWNLOAD_IS_RUNNING:
+                                if not SUBSCRIPTION_IS_RUNNING:
                                     process.terminate()
                                     log_both(f"[AUTO-POLL] Terminating check...")
                                     break
@@ -1660,8 +1668,15 @@ def run_subscription_poller():
                                                 pass
                             
                             process.wait()
-                            log_both(f"[AUTO-POLL] Finished background check for {url}. Downloaded {file_count} files ({(total_size_bytes/1048576):.2f} MB).")
-                            DOWNLOAD_IS_RUNNING = False
+
+                            if process.returncode != 0:
+                                log_both(f"[AUTO-POLL] Error during background check for {url}. Code: {process.returncode}")
+                                sub["last_status"] = f"Error ({process.returncode})"
+                            else:
+                                log_both(f"[AUTO-POLL] Finished background check for {url}. Downloaded {file_count} files ({(total_size_bytes/1048576):.2f} MB).")
+                                sub["last_status"] = "Success"
+
+                            SUBSCRIPTION_IS_RUNNING = False
                             
                             sub["last_polled"] = time.time()
                             sub["last_count"] = file_count
